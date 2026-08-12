@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
+	"github.com/OpenDeskViewer/platform/api/internal/apiv1"
 	"github.com/OpenDeskViewer/platform/api/internal/auth"
 	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/config"
@@ -100,6 +101,13 @@ func main() {
 	oidcBroker := rustdeskapi.NewOIDCBroker(jwtValidator, authService)
 	// Audit service for recording mutations
 	auditService := audit.New(pgPool)
+	
+	// Fleet service for device/group management
+	fleetService := fleet.NewService(pgPool, cfg)
+	
+	// apiv1 handler for our REST API
+	apiv1Handler := apiv1.NewHandler(pgPool, fleetService, accessResolver, auditService)
+	
 	rustdeskHandlers := rustdeskapi.NewHandlers(authService, telemetryService, auditService)
 	abHandler := rustdeskapi.NewAddressBookHandler(pgPool, accessResolver, cfg.AddressBookMaxPeers, auditService)
 	peerHandler := rustdeskapi.NewPeerHandler(pgPool, accessResolver, auditService)
@@ -108,7 +116,6 @@ func main() {
 
 	// Enrollment service handles token operations
 	enrollmentService := enrollment.NewService(pgPool, cfg)
-	fleetService := fleet.NewService(pgPool, cfg)
 
 	enrollmentHandler := rustdeskapi.NewEnrollmentHandler(pgPool, accessResolver, enrollmentService, fleetService, auditService)
 	sysinfoVerHandler := rustdeskapi.NewSysinfoVerHandler(pgPool)
@@ -172,6 +179,22 @@ func main() {
 	protected.HandleFunc("/api/audit/conn", auditHandler.HandleAuditConn)
 	protected.HandleFunc("/api/audit/file", auditHandler.HandleAuditFile)
 	protected.HandleFunc("/api/audit", auditHandler.HandleAuditNote)
+	
+	// apiv1 endpoints
+	protected.HandleFunc("/api/v1/stats/dashboard", apiv1Handler.HandleStatsDashboard)
+	protected.HandleFunc("/api/v1/devices", apiv1Handler.HandleDevices)
+	protected.HandleFunc("/api/v1/devices/{id}", apiv1Handler.HandleDeviceDetail)
+	protected.HandleFunc("/api/v1/devices/{id}/claim", apiv1Handler.HandleClaimDevice)
+	protected.HandleFunc("/api/v1/devices/{id}/reassign", apiv1Handler.HandleReassignDevice)
+	protected.HandleFunc("/api/v1/devices/{id}/connect", apiv1Handler.HandleDeviceConnect)
+	protected.HandleFunc("/api/v1/devices/{id}", apiv1Handler.HandleDeleteDevice)
+	protected.HandleFunc("/api/v1/customers", apiv1Handler.HandleCustomers)
+	protected.HandleFunc("/api/v1/customers/{id}/locations", apiv1Handler.HandleLocations)
+	protected.HandleFunc("/api/v1/device-groups", apiv1Handler.HandleDeviceGroups)
+	protected.HandleFunc("/api/v1/users", apiv1Handler.HandleUsers)
+	protected.HandleFunc("/api/v1/audit/events", apiv1Handler.HandleAuditEvents)
+	protected.HandleFunc("/api/v1/audit/sessions", apiv1Handler.HandleAuditSessions)
+	protected.HandleFunc("/api/v1/settings", apiv1Handler.HandleSettings)
 	
 	// Device deployment endpoints
 	protected.HandleFunc("/api/devices/deploy", auditHandler.HandleDevicesDeploy)

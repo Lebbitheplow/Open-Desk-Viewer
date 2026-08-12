@@ -20,6 +20,9 @@ type Resolver interface {
 	// Get all devices user can access
 	GetAccessibleDevices(ctx context.Context, userID int64) ([]uuid.UUID, error)
 
+	// Get paginated devices user can access
+	GetAccessibleDevicesPaginated(ctx context.Context, userID int64, offset, limit int64) ([]uuid.UUID, int64, error)
+
 	// Get all devices accessible from a device group
 	GetDevicesInGroup(ctx context.Context, groupID uuid.UUID) ([]uuid.UUID, error)
 
