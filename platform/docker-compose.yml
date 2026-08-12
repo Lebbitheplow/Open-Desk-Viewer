@@ -1,0 +1,194 @@
+version: '3.8'
+
+services:
+  # ========== PostgreSQL ==========
+  postgres:
+    image: postgres:16-alpine
+    container_name: opendeskviewer-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - opendeskviewer-network
+    restart: unless-stopped
+
+  # ========== Keycloak ==========
+  keycloak:
+    image: quay.io/keycloak/keycloak:23.0.0
+    container_name: opendeskviewer-keycloak
+    command: start --features=preview
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-change_me_in_production}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak_password
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME: ${PUBLIC_HOST:-localhost}
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+    volumes:
+      - ../platform/keycloak/realm-opendeskviewer.json:/opt/keycloak/data/import/realm-opendeskviewer.json
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/realms/opendeskviewer/.well-known/openid-configuration || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    networks:
+      - opendeskviewer-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ========== RustDesk Rendezvous (hbbs) ==========
+  hbbs:
+    image: rustdesk/rustdesk-server:latest
+    container_name: opendeskviewer-hbbs
+    command: hbbs -r hbbr:21117 -k _
+    volumes:
+      - hbbs_data:/data
+    ports:
+      - "${RENDEZVOUS_PORT:-21116}:${RENDEZVOUS_PORT:-21116}"
+      - "${RENDEZVOUS_PORT:-21116}:${RENDEZVOUS_PORT:-21116}/udp"
+      - "21115:21115"
+      - "21118:21118"
+      - "21117:21117"
+    networks:
+      - opendeskviewer-network
+    restart: unless-stopped
+
+  # ========== RustDesk Relay (hbbr) ==========
+  hbbr:
+    image: rustdesk/rustdesk-server:latest
+    container_name: opendeskviewer-hbbr
+    command: hbbr -k _
+    volumes:
+      - hbbr_data:/data
+    ports:
+      - "${RELAY_PORT:-21117}:${RELAY_PORT:-21117}"
+      - "21119:21119"
+    networks:
+      - opendeskviewer-network
+    restart: unless-stopped
+
+  # ========== Go API Server ==========
+  api:
+    build:
+      context: ../platform/api
+      dockerfile: Dockerfile
+    container_name: opendeskviewer-api
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - KEYCLOAK_HOST=keycloak
+      - KEYCLOAK_PORT=8080
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-opendeskviewer}
+      - KEYCLOAK_CLIENT_API=${OIDC_CLIENT_API:-odv-api}
+      - KEYCLOAK_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - PUBLIC_HOST=${PUBLIC_HOST}
+      - RUSTDESK_PUBLIC_KEY=${RUSTDESK_PUBLIC_KEY}
+      - JWT_SECRET=${JWT_SECRET}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_API:-odv-api}
+      - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
+      - OIDC_ISSUER=http://keycloak:8080/realms/${KEYCLOAK_REALM:-opendeskviewer}
+      - API_BOOTSTRAP_ADMIN_EMAIL=${API_BOOTSTRAP_ADMIN_EMAIL}
+       - DEBUG=${DEBUG:-false}
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - opendeskviewer-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ========== Background Worker ==========
+  worker:
+    build:
+      context: ../platform/api
+      dockerfile: Dockerfile.worker
+      target: worker
+    container_name: opendeskviewer-worker
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DEBUG=${DEBUG:-false}
+      - WORKER_INTERVAL_HEARTBEAT_CHECK_SECONDS=${WORKER_INTERVAL_HEARTBEAT_CHECK_SECONDS:-60}
+      - WORKER_INTERVAL_TOKEN_CLEANUP_HOURS=${WORKER_INTERVAL_TOKEN_CLEANUP_HOURS:-24}
+      - WORKER_INTERVAL_AUDIT_CLEANUP_DAYS=${WORKER_INTERVAL_AUDIT_CLEANUP_DAYS:-90}
+    networks:
+      - opendeskviewer-network
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ========== Web Portal ==========
+  web:
+    build:
+      context: ../platform/web
+      dockerfile: Dockerfile
+    container_name: opendeskviewer-web
+    environment:
+      - VITE_API_URL=/api/v1
+      - VITE_OIDC_ISSUER=https://${PUBLIC_HOST:-localhost}/realms/${KEYCLOAK_REALM:-opendeskviewer}
+      - VITE_OIDC_CLIENT_ID=odv-portal
+    networks:
+      - opendeskviewer-network
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ========== Caddy Reverse Proxy ==========
+  caddy:
+    image: caddy:2-alpine
+    container_name: opendeskviewer-caddy
+    volumes:
+      - ../platform/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    networks:
+      - opendeskviewer-network
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+networks:
+  opendeskviewer-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  hbbs_data:
+  hbbr_data:
+  caddy_data:
+  caddy_config:

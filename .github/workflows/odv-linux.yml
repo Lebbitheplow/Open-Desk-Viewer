@@ -1,0 +1,94 @@
+name: Linux Desktop Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flutter/**'
+      - 'libs/hbb_common/**'
+      - 'src/**'
+      - '.github/workflows/odv-linux.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'flutter/**'
+      - 'libs/hbb_common/**'
+      - 'src/**'
+      - '.github/workflows/odv-linux.yml'
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  RUST_VERSION: '1.82.0'
+
+jobs:
+  build-linux:
+    name: Build Linux AppImage
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Client configuration guard
+        run: |
+          bash .github/scripts/check-client-config.sh
+        env:
+          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
+          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
+          API_SERVER: ${{ vars.API_SERVER }}
+          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install Flutter dependencies
+        run: |
+          cd flutter
+          flutter pub get
+
+      - name: Build Rust library
+        run: |
+          cd libs/hbb_common
+          cargo build --release
+
+      - name: Build Linux desktop app
+        run: |
+          cd flutter
+          flutter build linux --release
+
+      - name: Build AppImage (x86_64)
+        run: |
+          sudo apt-get install -y appimage-builder
+          cd appimage
+          appimage-builder --skip-test --recipe AppImageBuilder-x86_64.yml 2>&1 || true
+
+      - name: Build AppImage (aarch64)
+        run: |
+          sudo apt-get install -y appimage-builder
+          cd appimage
+          appimage-builder --skip-test --recipe AppImageBuilder-aarch64.yml 2>&1 || true
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            appimage/out/*.AppImage
+          retention-days: 7

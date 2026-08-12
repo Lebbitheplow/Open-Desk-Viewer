@@ -1,0 +1,4 @@
+storePassword=change_me
+keyPassword=change_me
+keyAlias=odv-key
+storeFile=../android/keys/odv-key.jks

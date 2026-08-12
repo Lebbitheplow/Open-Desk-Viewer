@@ -1,0 +1,82 @@
+name: Platform CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'platform/**'
+      - '.github/workflows/odv-platform.yml'
+      - '.github/scripts/check-client-config.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'platform/**'
+      - '.github/workflows/odv-platform.yml'
+      - '.github/scripts/check-client-config.sh'
+
+jobs:
+  build-and-test:
+    name: Build, test, and verify
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        working-directory: platform/api
+        run: go mod download
+
+      - name: Build
+        working-directory: platform/api
+        run: go build ./...
+
+      - name: Vet
+        working-directory: platform/api
+        run: go vet ./...
+
+      - name: Test
+        working-directory: platform/api
+        run: go test ./...
+
+      - name: Check client configuration
+        run: |
+          bash .github/scripts/check-client-config.sh
+        env:
+          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
+          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
+          API_SERVER: ${{ vars.API_SERVER }}
+          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+
+      - name: Check docker-compose
+        run: |
+          cd platform
+          docker compose config
+
+      - name: Test portal build
+        working-directory: platform/web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run Go tests with database
+        working-directory: platform/api
+        run: |
+          docker run -d --name odv-test-db -e POSTGRES_PASSWORD=odvtest -e POSTGRES_USER=odv -e POSTGRES_DB=odv -p 55432:5432 postgres:16-alpine
+          sleep 5
+          psql -h localhost -p 55432 -U odv -d odv < migrations/000001_initial_schema.up.sql
+          psql -h localhost -p 55432 -U odv -d odv < migrations/000002_address_book.up.sql
+          ODV_TEST_DB=1 go test ./internal/integration/ -v
+          docker stop odv-test-db
+        env:
+          PGPASSWORD: odvtest

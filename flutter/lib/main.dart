@@ -120,6 +120,20 @@ Future<void> main(List<String> args) async {
   }
 }
 
+Future<void> applyPreConfig() async {
+  for (var arg in kBootArgs) {
+    if (arg.startsWith('--id-server=')) {
+      await bind.mainSetOption(key: 'custom-rendezvous-server', value: arg.substring(12));
+    } else if (arg.startsWith('--api-server=')) {
+      await bind.mainSetOption(key: 'api-server', value: arg.substring(13));
+    } else if (arg.startsWith('--relay-server=')) {
+      await bind.mainSetOption(key: 'relay-server', value: arg.substring(15));
+    } else if (arg.startsWith('--key=')) {
+      await bind.mainSetOption(key: 'key', value: arg.substring(6));
+    }
+  }
+}
+
 Future<void> initEnv(String appType) async {
   // global shared preference
   await platformFFI.init(appType);
@@ -127,6 +141,10 @@ Future<void> initEnv(String appType) async {
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
   await initGlobalFFI();
+  // Apply pre-configuration from boot args (e.g. --id-server=, --api-server=)
+  if (appType == kAppTypeMain) {
+    await applyPreConfig();
+  }
   // await Firebase.initializeApp();
   _registerEventHandler();
   // Update the system theme.

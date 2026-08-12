@@ -1,0 +1,1386 @@
+openapi: 3.0.3
+info:
+  title: OpenDeskViewer RustDesk Pro API
+  version: 1.0.0
+  description: |
+    RustDesk Pro-compatible API for OpenDeskViewer management platform.
+    This API is consumed by the unmodified RustDesk client.
+    
+    All endpoints use snake_case and return `{"error": "..."}` on failure.
+    Pagination uses `?current=&pageSize=` with response `{total, data}`.
+    Authentication: `Authorization: Bearer <token>` for authenticated endpoints.
+
+servers:
+  - url: http://localhost:8000
+
+paths:
+  # ========== Authentication ==========
+
+  /api/login-options:
+    get:
+      summary: Get available login options
+      description: Returns list of available authentication methods (OIDC only).
+      operationId: getLoginOptions
+      tags:
+        - Auth
+      responses:
+        '200':
+          description: List of login options
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loginOptions:
+                    type: array
+                    items:
+                      type: string
+                      examples: ["common-oidc/[]"]
+                required:
+                  - loginOptions
+
+  /api/login:
+    post:
+      summary: User login
+      description: Login with username and password. Only supports OIDC-brokered login.
+      operationId: postLogin
+      tags:
+        - Auth
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+
+  /api/logout:
+    post:
+      summary: User logout
+      description: Terminate the current session.
+      operationId: postLogout
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logout successful
+
+  /api/currentUser:
+    get:
+      summary: Get current user info
+      description: Returns information about the authenticated user.
+      operationId: getCurrentUser
+      tags:
+        - Auth
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPayload'
+
+  # ========== OIDC Authentication ==========
+
+  /api/oidc/auth:
+    post:
+      summary: Start OIDC authorization
+      description: Begins the authorization-code+PKCE flow against Keycloak.
+      operationId: postOidcAuth
+      tags:
+        - OIDC
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                client_id:
+                  type: string
+                  example: odv-portal
+                redirect_uri:
+                  type: string
+                  example: http://localhost:8080/oidc/callback
+                code_verifier:
+                  type: string
+              required:
+                - client_id
+                - redirect_uri
+                - code_verifier
+      responses:
+        '200':
+          description: Authorization URL and state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auth_url:
+                    type: string
+                    description: Keycloak authorization URL
+                  state:
+                    type: string
+                    description: OAuth2 state for PKCE
+                required:
+                  - auth_url
+                  - state
+
+  /api/oidc/auth-query:
+    get:
+      summary: Check OIDC auth status
+      description: Poll to check if the authorization code exchange completed.
+      operationId: getOidcAuthQuery
+      tags:
+        - OIDC
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Auth query result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, success, failure]
+                  token:
+                    type: string
+                    description: Session token if successful
+                required:
+                  - status
+
+  # ========== Address Book (ab) ==========
+
+  /api/ab/settings:
+    get:
+      summary: Get address book settings
+      description: Returns address book configuration including device group permissions.
+      operationId: getAbSettings
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Address book settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ab_id:
+                    type: string
+                    description: Unique address book ID
+                  name:
+                    type: string
+                    description: Address book name
+                  device_groups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceGroup'
+                required:
+                  - ab_id
+                  - name
+
+  /api/ab/personal:
+    get:
+      summary: Get personal address book
+      description: Returns user's personal address book (legacy endpoint).
+      operationId: getAbPersonal
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Personal address book
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressBook'
+
+  /api/ab/shared/profiles:
+    get:
+      summary: Get shared address book profiles
+      description: Returns list of address book profiles the user has access to.
+      operationId: getAbSharedProfiles
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of address book profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/AddressBookProfile'
+                  total:
+                    type: integer
+                required:
+                  - data
+                  - total
+
+  /api/ab/peers:
+    get:
+      summary: Get peers in address book
+      description: Returns devices in a specific address book with pagination.
+      operationId: getAbPeers
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: ab
+          in: query
+          required: true
+          schema:
+            type: string
+            description: Address book ID (GUID)
+        - name: current
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+        - name: keyword
+          in: query
+          required: false
+          schema:
+            type: string
+            description: Search keyword
+      responses:
+        '200':
+          description: Peers list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedPeers'
+
+  /api/ab/tags/{guid}:
+    get:
+      summary: Get address book tags
+      description: Returns tags for a specific address book.
+      operationId: getAbTags
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: guid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Tags list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Tag'
+                required:
+                  - data
+
+  # Mutations answer 200 with an EMPTY body. The client treats any content on a
+  # 200 as an error message (_jsonDecodeActionResp in ab_model.dart).
+  # Only the personal book is writable; the shared books are projections of the
+  # fleet and answer 403.
+  /api/ab/peer/add/{guid}:
+    post:
+      summary: Add a peer to an address book
+      description: Adds a peer to the personal address book. Re-adding an existing id updates it.
+      operationId: postAbPeerAdd
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AbPeer'
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+
+  /api/ab/peer/update/{guid}:
+    put:
+      summary: Update a peer
+      description: >
+        Partial update. Only the fields present in the body are changed, so an
+        omitted field is left alone rather than cleared.
+      operationId: putAbPeerUpdate
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                alias:
+                  type: string
+                note:
+                  type: string
+                hash:
+                  type: string
+                tags:
+                  type: array
+                  items:
+                    type: string
+                forceAlwaysRelay:
+                  type: string
+                rdpPort:
+                  type: string
+                rdpUsername:
+                  type: string
+              required:
+                - id
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+        '404':
+          description: No such peer in this book
+
+  /api/ab/peer/{guid}:
+    delete:
+      summary: Delete peers
+      operationId: deleteAbPeers
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              description: RustDesk ids to remove
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+
+  /api/ab/tag/add/{guid}:
+    post:
+      summary: Add a tag
+      operationId: postAbTagAdd
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AbTag'
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+
+  /api/ab/tag/rename/{guid}:
+    put:
+      summary: Rename a tag
+      description: Renames the tag and rewrites it across every peer that carries it.
+      operationId: putAbTagRename
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                old:
+                  type: string
+                new:
+                  type: string
+              required:
+                - old
+                - new
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+        '404':
+          description: No such tag in this book
+
+  /api/ab/tag/update/{guid}:
+    put:
+      summary: Set a tag colour
+      operationId: putAbTagUpdate
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AbTag'
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+        '404':
+          description: No such tag in this book
+
+  /api/ab/tag/{guid}:
+    delete:
+      summary: Delete tags
+      description: Removes the tags and strips them from every peer that carries them.
+      operationId: deleteAbTags
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AbGuid'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+      responses:
+        '200':
+          description: Success, with an empty body
+        '403':
+          description: The book is read-only or not accessible
+
+  /api/ab/get:
+    post:
+      summary: Legacy address book query
+      description: Legacy endpoint for older clients.
+      operationId: postAbGet
+      tags:
+        - AddressBook
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+              required:
+                - id
+      responses:
+        '200':
+          description: Address book data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressBook'
+
+  # ========== Device Groups ==========
+
+  /api/device-group/accessible:
+    get:
+      summary: Get accessible device groups
+      description: Returns device groups the user can access.
+      operationId: getDeviceGroupAccessible
+      tags:
+        - DeviceGroup
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Accessible device groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DeviceGroup'
+                required:
+                  - data
+
+  # ========== Users ==========
+
+  /api/users:
+    get:
+      summary: Get users list
+      description: Returns list of users in the system.
+      operationId: getUsers
+      tags:
+        - User
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: current
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Users list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+                  total:
+                    type: integer
+                required:
+                  - data
+                  - total
+
+  # ========== Peers (Devices) ==========
+
+  /api/peers:
+    get:
+      summary: Get peers list
+      description: Returns all peers in the system (Admin only).
+      operationId: getPeers
+      tags:
+        - Peer
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: current
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        '200':
+          description: Peers list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Peer'
+                  total:
+                    type: integer
+                required:
+                  - data
+                  - total
+
+  # ========== Heartbeat & Sysinfo ==========
+
+  /api/heartbeat:
+    post:
+      summary: Device heartbeat
+      description: Device sends periodic heartbeat to indicate online status.
+      operationId: postHeartbeat
+      tags:
+        - Device
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Device ID (rustdesk_id)
+                uuid:
+                  type: string
+                  description: Hardware UUID
+                online:
+                  type: boolean
+                peers:
+                  type: array
+                  items:
+                    type: object
+                  description: Peers list for shared ab
+                username:
+                  type: string
+                  description: Logged-in username
+                name:
+                  type: string
+                  description: Device name
+                status:
+                  type: string
+                  enum: [online, offline]
+                disconnect:
+                  type: array
+                  items:
+                    type: integer
+                  description: Connection IDs to disconnect
+                strategy:
+                  type: object
+                  description: Central config push
+              required:
+                - id
+                - uuid
+      responses:
+        '200':
+          description: Heartbeat response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disconnect:
+                    type: array
+                    items:
+                      type: integer
+                    description: Connection IDs to close
+                  strategy:
+                    type: object
+                    description: Central config to push
+                  username:
+                    type: string
+                  name:
+                    type: string
+                  platform:
+                    type: string
+                  status:
+                    type: string
+                  online:
+                    type: boolean
+
+  /api/sysinfo:
+    post:
+      summary: Device sysinfo
+      description: Device sends system information (CPU, memory, disk, OS version).
+      operationId: postSysinfo
+      tags:
+        - Device
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                  description: Device ID
+                uuid:
+                  type: string
+                  description: Hardware UUID
+                username:
+                  type: string
+                  description: Desktop username
+                hostname:
+                  type: string
+                  description: System hostname
+                platform:
+                  type: string
+                  enum: [Windows, Linux, macOS, Android, iOS]
+                version:
+                  type: string
+                  description: Client version (e.g., 1.2.3)
+                os:
+                  type: string
+                  description: Full OS version string
+                serial:
+                  type: string
+                  description: Hardware serial number (optional)
+                device_group_name:
+                  type: string
+                  description: Preset device group name from enrollment
+                address_book_name:
+                  type: string
+                  description: Preset address book name from enrollment
+              required:
+                - id
+                - uuid
+                - username
+                - hostname
+                - platform
+                - version
+                - os
+      responses:
+        '200':
+          description: Sysinfo received
+
+  /api/sysinfo_ver:
+    post:
+      summary: Device sysinfo version
+      description: Version-specific sysinfo endpoint.
+      operationId: postSysinfoVer
+      tags:
+        - Device
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                version:
+                  type: string
+              required:
+                - id
+                - version
+      responses:
+        '200':
+          description: Version received
+
+  # ========== Audit ==========
+
+  /api/audit/conn:
+    post:
+      summary: Record connection audit
+      description: Client reports connection start/end.
+      operationId: postAuditConn
+      tags:
+        - Audit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                uuid:
+                  type: string
+                peer_id:
+                  type: string
+                  description: Remote device ID
+                session_id:
+                  type: string
+                  format: uuid
+                username:
+                  type: string
+                platform:
+                  type: string
+                event:
+                  type: string
+                  enum: [start, end]
+                conn_id:
+                  type: string
+                conn_type:
+                  type: string
+                  enum: [direct, relay]
+                gateway_id:
+                  type: string
+              required:
+                - id
+                - uuid
+                - peer_id
+                - session_id
+                - username
+                - platform
+                - event
+      responses:
+        '200':
+          description: Audit event recorded
+
+  /api/audit/file:
+    post:
+      summary: Record file transfer audit
+      operationId: postAuditFile
+      tags:
+        - Audit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                peer_id:
+                  type: string
+                session_id:
+                  type: string
+                username:
+                  type: string
+                platform:
+                  type: string
+                event:
+                  type: string
+                path:
+                  type: string
+                to_username:
+                  type: string
+              required:
+                - id
+                - peer_id
+                - session_id
+                - username
+                - platform
+                - event
+      responses:
+        '200':
+          description: File audit event recorded
+
+  # ========== Device Deployment (optional - for managed clients) ==========
+
+  /api/devices/deploy:
+    post:
+      summary: Device deployment
+      description: Push configuration to managed devices.
+      operationId: postDevicesDeploy
+      tags:
+        - Device
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                peer_id:
+                  type: string
+                uuid:
+                  type: string
+                username:
+                  type: string
+                platform:
+                  type: string
+                config:
+                  type: object
+              required:
+                - id
+                - peer_id
+                - uuid
+                - username
+                - platform
+      responses:
+        '200':
+          description: Deployment command sent
+
+  /api/devices/cli:
+    post:
+      summary: Send CLI command to device
+      operationId: postDevicesCli
+      tags:
+        - Device
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                peer_id:
+                  type: string
+                uuid:
+                  type: string
+                username:
+                  type: string
+                platform:
+                  type: string
+                command:
+                  type: string
+              required:
+                - id
+                - peer_id
+                - uuid
+                - username
+                - platform
+                - command
+       responses:
+         '200':
+           description: CLI command sent
+
+  /api/record:
+    post:
+      summary: Upload session recording
+      operationId: postRecord
+      tags:
+        - Audit
+      security:
+        - bearerAuth: []
+      responses:
+        '501':
+          description: Session recording is not enabled
+
+  /api/switch-grant:
+    post:
+      summary: Request approval to switch control sides
+      operationId: postSwitchGrant
+      tags:
+        - Control
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                id:
+                  type: string
+                peer_id:
+                  type: string
+                uuid:
+                  type: string
+                timestamp:
+                  type: string
+                switch_code_verifier:
+                  type: string
+                signature:
+                  type: string
+              required:
+                - id
+                - peer_id
+                - uuid
+                - timestamp
+                - switch_code_verifier
+                - signature
+      responses:
+        '200':
+          description: Switch grant approved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accepted:
+                    type: boolean
+
+  /lic/web/api/plugin-sign:
+    post:
+      summary: Verify plugin signature
+      operationId: postPluginSign
+      tags:
+        - Plugin
+      security:
+        - bearerAuth: []
+      responses:
+        '501':
+          description: Plugin signing verification is not enabled
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    AbGuid:
+      name: guid
+      in: path
+      required: true
+      description: >
+        The address book's guid. For the personal book this is the id returned
+        by /api/ab/personal; for a shared book it is the support group's own id,
+        or the fixed fleet guid 00000000-0000-0000-0000-0000000000fe.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    AbPeer:
+      type: object
+      description: An address book entry, as flutter/lib/models/peer_model.dart models it.
+      properties:
+        id:
+          type: string
+          description: The peer's RustDesk id
+        hash:
+          type: string
+          description: Password hash, personal books only
+        username:
+          type: string
+        hostname:
+          type: string
+        platform:
+          type: string
+          enum: [Windows, Linux, Mac OS, Android]
+        alias:
+          type: string
+        note:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        forceAlwaysRelay:
+          type: string
+          description: Serialised as the string "true" or "false", not as a bool
+          enum: ["true", "false"]
+        rdpPort:
+          type: string
+        rdpUsername:
+          type: string
+        loginName:
+          type: string
+          description: The owning customer, on shared books
+        device_group_name:
+          type: string
+      required:
+        - id
+
+    AbTag:
+      type: object
+      properties:
+        name:
+          type: string
+        color:
+          type: integer
+          format: int64
+          description: A Flutter ARGB Color.value, which does not fit in int32
+      required:
+        - name
+
+    LoginRequest:
+      type: object
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+        pin:
+          type: string
+        id:
+          type: string
+        uuid:
+          type: string
+        token:
+          type: string
+        hash:
+          type: boolean
+        self_host:
+          type: boolean
+      required:
+        - username
+        - password
+
+    LoginResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success, failure]
+        token:
+          type: string
+        error:
+          type: string
+        privacy_mode:
+          type: string
+      required:
+        - status
+
+    UserPayload:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+          enum: [Admin, User, Guest]
+        token:
+          type: string
+        avatar:
+          type: string
+        settings:
+          type: object
+        groups:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - username
+        - email
+        - role
+        - token
+
+    AddressBook:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        ab_id:
+          type: string
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Peer'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+      required:
+        - id
+        - name
+        - peers
+
+    AddressBookProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        ab_id:
+          type: string
+        shared_ab_ids:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - name
+
+    Peer:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Device ID (rustdesk_id)
+        uuid:
+          type: string
+        username:
+          type: string
+        hostname:
+          type: string
+        platform:
+          type: string
+          enum: [Windows, Linux, macOS, Android, iOS]
+        tags:
+          type: string
+        online:
+          type: boolean
+        status:
+          type: string
+          enum: [online, offline]
+        connect_status:
+          type: string
+        login_name:
+          type: string
+        last_connected_at:
+          type: string
+          format: date-time
+        device_group_id:
+          type: string
+        customer_id:
+          type: string
+        location_id:
+          type: string
+      required:
+        - id
+        - uuid
+        - username
+        - hostname
+        - platform
+
+    Tag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        color:
+          type: string
+        ab_id:
+          type: string
+      required:
+        - id
+        - name
+
+    DeviceGroup:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        parent_id:
+          type: string
+        peers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Peer'
+      required:
+        - id
+        - name
+
+    PaginatedPeers:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Peer'
+        total:
+          type: integer
+        current:
+          type: integer
+        pageSize:
+          type: integer
+      required:
+        - data
+        - total
+
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+        username:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        active:
+          type: boolean
+        last_login:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - username
+        - email
+        - role
+
+    Device:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        rustdesk_id:
+          type: string
+        name:
+          type: string
+        uuid:
+          type: string
+        serial_number:
+          type: string
+        customer_id:
+          type: string
+        location_id:
+          type: string
+        state:
+          type: string
+          enum: [DISCOVERED, PROVISIONING, ACTIVE, DISABLED, DECOMMISSIONED]
+        connectivity:
+          type: string
+          enum: [ONLINE, STALE, OFFLINE, UNKNOWN]
+        last_seen_at:
+          type: string
+          format: date-time
+        client_version:
+          type: string
+        os:
+          type: string
+        hostname:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - rustdesk_id
+        - name
+        - state
+        - connectivity

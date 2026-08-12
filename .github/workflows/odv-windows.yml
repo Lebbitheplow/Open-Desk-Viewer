@@ -1,0 +1,93 @@
+name: Windows Desktop Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'flutter/**'
+      - 'libs/hbb_common/**'
+      - 'src/**'
+      - '.github/workflows/odv-windows.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'flutter/**'
+      - 'libs/hbb_common/**'
+      - 'src/**'
+      - '.github/workflows/odv-windows.yml'
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.24.0'
+  RUST_VERSION: '1.82.0'
+
+jobs:
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Client configuration guard
+        run: |
+          bash .github/scripts/check-client-config.sh
+        env:
+          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
+          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
+          API_SERVER: ${{ vars.API_SERVER }}
+          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+        shell: bash
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Flutter dependencies
+        run: |
+          cd flutter
+          flutter pub get
+
+      - name: Configure Git for Windows
+        run: |
+          git config --global core.autocrlf input
+
+      - name: Build Rust library
+        run: |
+          cd libs/hbb_common
+          cargo build --release
+
+      - name: Build Windows desktop app
+        run: |
+          cd flutter
+          flutter build windows --release
+
+      - name: Create NSIS installer
+        run: |
+          choco install nsis
+          cd flutter/build/windows/x64/runner/Release
+          dir
+          if (Test-Path "OpenDeskViewer.exe") {
+            & "C:\Program Files (x86)\NSIS\makensis.exe" /DOUTPUT_FILE="OpenDeskViewer.exe" /DVERSION="${{ github.sha }}" NSIS_TEMPLATE.nsi 2>&1 || echo "NSIS build skipped"
+          }
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: |
+            flutter/build/windows/x64/runner/Release/*.exe
+            flutter/build/windows/x64/runner/Release/**/*.dll
+          retention-days: 7

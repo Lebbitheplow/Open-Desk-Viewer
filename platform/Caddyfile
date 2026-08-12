@@ -1,0 +1,38 @@
+{
+    admin off
+}
+
+${PUBLIC_HOST:-localhost} {
+  # API gateway for /api/v1/* (our REST API) - must come before /api*
+  reverse_proxy /api/v1* http://api:8000 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Real-IP {remote_host}
+  }
+
+  # API gateway for /api/* (RustDesk Pro compatibility)
+  reverse_proxy /api* http://api:8000 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Real-IP {remote_host}
+  }
+
+  # API gateway for /lic/web/api/* (plugin-sign endpoint)
+  reverse_proxy /lic/web/api* http://api:8000 {
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Real-IP {remote_host}
+  }
+
+  # Web portal
+  reverse_proxy http://web:80 {
+    header_up Host {host}
+    header_up X-Forwarded-Proto {scheme}
+    header_up X-Real-IP {remote_host}
+  }
+}
+
+21114 {
+  # Plain HTTP API endpoint for clients that derive API URL from rendezvous server
+  reverse_proxy /api* http://api:8000 {
+    header_up X-Forwarded-Proto http
+    header_up X-Real-IP {remote_host}
+  }
+}
