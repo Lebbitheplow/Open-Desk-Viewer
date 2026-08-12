@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/peers"
 	"github.com/OpenDeskViewer/platform/api/internal/postgres"
@@ -11,13 +12,15 @@ import (
 
 // PeerHandler handles peers endpoints
 type PeerHandler struct {
-	service *peers.Service
+	service       *peers.Service
+	auditRecorder audit.Recorder
 }
 
 // NewPeerHandler creates a new peer handler
-func NewPeerHandler(db *postgres.Pool, accessResolver access.Resolver) *PeerHandler {
+func NewPeerHandler(db *postgres.Pool, accessResolver access.Resolver, auditRecorder audit.Recorder) *PeerHandler {
 	return &PeerHandler{
-		service: peers.NewService(db, accessResolver),
+		service:       peers.NewService(db, accessResolver),
+		auditRecorder: auditRecorder,
 	}
 }
 

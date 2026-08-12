@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/identity"
 	"github.com/OpenDeskViewer/platform/api/internal/rustdeskapi"
@@ -48,7 +49,8 @@ func newABServer(t *testing.T, f *fixture, userID int64) *abServer {
 		t.Fatalf("failed to create a session: %v", err)
 	}
 
-	handler := rustdeskapi.NewAddressBookHandler(f.db, newResolver(f), 0)
+	auditService := audit.New(f.db)
+	handler := rustdeskapi.NewAddressBookHandler(f.db, newResolver(f), 0, auditService)
 
 	public := httpx.NewRouter(
 		httpx.RequestIDMiddleware(),

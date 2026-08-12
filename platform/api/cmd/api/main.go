@@ -11,6 +11,7 @@ import (
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
 	"github.com/OpenDeskViewer/platform/api/internal/auth"
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/config"
 	"github.com/OpenDeskViewer/platform/api/internal/enrollment"
 	"github.com/OpenDeskViewer/platform/api/internal/fleet"
@@ -97,17 +98,19 @@ func main() {
 	)
 
 	oidcBroker := rustdeskapi.NewOIDCBroker(jwtValidator, authService)
-	rustdeskHandlers := rustdeskapi.NewHandlers(authService, telemetryService)
-	abHandler := rustdeskapi.NewAddressBookHandler(pgPool, accessResolver, cfg.AddressBookMaxPeers)
-	peerHandler := rustdeskapi.NewPeerHandler(pgPool, accessResolver)
-	auditHandler := rustdeskapi.NewAuditHandler(pgPool, accessResolver)
+	// Audit service for recording mutations
+	auditService := audit.New(pgPool)
+	rustdeskHandlers := rustdeskapi.NewHandlers(authService, telemetryService, auditService)
+	abHandler := rustdeskapi.NewAddressBookHandler(pgPool, accessResolver, cfg.AddressBookMaxPeers, auditService)
+	peerHandler := rustdeskapi.NewPeerHandler(pgPool, accessResolver, auditService)
+	auditHandler := rustdeskapi.NewAuditHandler(pgPool, accessResolver, auditService)
 	usersHandler := rustdeskapi.NewUsersHandler(authService, accessResolver)
 
 	// Enrollment service handles token operations
 	enrollmentService := enrollment.NewService(pgPool, cfg)
 	fleetService := fleet.NewService(pgPool, cfg)
 
-	enrollmentHandler := rustdeskapi.NewEnrollmentHandler(pgPool, accessResolver, enrollmentService, fleetService)
+	enrollmentHandler := rustdeskapi.NewEnrollmentHandler(pgPool, accessResolver, enrollmentService, fleetService, auditService)
 	sysinfoVerHandler := rustdeskapi.NewSysinfoVerHandler(pgPool)
 
 	// public carries everything that must work without a token. protected adds

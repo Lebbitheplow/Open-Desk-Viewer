@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/enrollment"
 	"github.com/OpenDeskViewer/platform/api/internal/fleet"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
@@ -15,19 +16,21 @@ import (
 
 // EnrollmentHandler handles enrollment token endpoints
 type EnrollmentHandler struct {
-	db         *postgres.Pool
-	access     access.Resolver
-	enrollment *enrollment.Service
-	fleet      *fleet.Service
+	db            *postgres.Pool
+	access        access.Resolver
+	enrollment    *enrollment.Service
+	fleet         *fleet.Service
+	auditRecorder audit.Recorder
 }
 
 // NewEnrollmentHandler creates a new enrollment handler
-func NewEnrollmentHandler(db *postgres.Pool, accessResolver access.Resolver, enrollmentService *enrollment.Service, fleetService *fleet.Service) *EnrollmentHandler {
+func NewEnrollmentHandler(db *postgres.Pool, accessResolver access.Resolver, enrollmentService *enrollment.Service, fleetService *fleet.Service, auditRecorder audit.Recorder) *EnrollmentHandler {
 	return &EnrollmentHandler{
-		db:         db,
-		access:     accessResolver,
-		enrollment: enrollmentService,
-		fleet:      fleetService,
+		db:            db,
+		access:        accessResolver,
+		enrollment:    enrollmentService,
+		fleet:         fleetService,
+		auditRecorder: auditRecorder,
 	}
 }
 

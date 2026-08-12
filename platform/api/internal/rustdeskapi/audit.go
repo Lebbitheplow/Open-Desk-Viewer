@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/postgres"
 	"github.com/google/uuid"
@@ -13,13 +14,14 @@ import (
 
 // AuditHandler handles audit endpoints
 type AuditHandler struct {
-	db         *postgres.Pool
-	access     access.Resolver
+	db            *postgres.Pool
+	access        access.Resolver
+	auditRecorder audit.Recorder
 }
 
 // NewAuditHandler creates a new audit handler
-func NewAuditHandler(db *postgres.Pool, accessResolver access.Resolver) *AuditHandler {
-	return &AuditHandler{db: db, access: accessResolver}
+func NewAuditHandler(db *postgres.Pool, accessResolver access.Resolver, auditRecorder audit.Recorder) *AuditHandler {
+	return &AuditHandler{db: db, access: accessResolver, auditRecorder: auditRecorder}
 }
 
 // HandleAuditConn handles /api/audit/conn

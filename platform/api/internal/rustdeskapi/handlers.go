@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/identity"
 	"github.com/OpenDeskViewer/platform/api/internal/telemetry"
@@ -13,13 +14,15 @@ import (
 type Handlers struct {
 	authService      *identity.AuthService
 	telemetryService *telemetry.Service
+	auditRecorder    audit.Recorder
 }
 
 // NewHandlers creates new handlers
-func NewHandlers(auth *identity.AuthService, telem *telemetry.Service) *Handlers {
+func NewHandlers(auth *identity.AuthService, telem *telemetry.Service, auditRecorder audit.Recorder) *Handlers {
 	return &Handlers{
 		authService:      auth,
 		telemetryService: telem,
+		auditRecorder:    auditRecorder,
 	}
 }
 

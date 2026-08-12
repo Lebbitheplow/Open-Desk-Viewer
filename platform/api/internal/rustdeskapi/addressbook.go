@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
 	"github.com/OpenDeskViewer/platform/api/internal/addressbook"
+	"github.com/OpenDeskViewer/platform/api/internal/audit"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/identity"
 	"github.com/OpenDeskViewer/platform/api/internal/postgres"
@@ -21,13 +22,15 @@ type AddressBookHandler struct {
 	// maxPeerOneAb is reported to the client as its per-book cap. Zero means no
 	// limit, which is what the client assumes when the field is absent.
 	maxPeerOneAb int
+	auditRecorder audit.Recorder
 }
 
 // NewAddressBookHandler creates a new address book handler
-func NewAddressBookHandler(db *postgres.Pool, accessResolver access.Resolver, maxPeerOneAb int) *AddressBookHandler {
+func NewAddressBookHandler(db *postgres.Pool, accessResolver access.Resolver, maxPeerOneAb int, auditRecorder audit.Recorder) *AddressBookHandler {
 	return &AddressBookHandler{
 		service:      addressbook.NewService(db, accessResolver),
 		maxPeerOneAb: maxPeerOneAb,
+		auditRecorder: auditRecorder,
 	}
 }
 
