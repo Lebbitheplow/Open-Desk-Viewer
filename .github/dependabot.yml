@@ -7,18 +7,21 @@
 # target-branch matters here: this repository's default branch is master, and a
 # dependabot entry aimed at a branch that does not exist opens no pull requests
 # and reports no error.
+#
+# Scoped deliberately to platform/ only. The two entries that used to sit here,
+# "gitsubmodule" and "github-actions", both watched upstream's surface rather
+# than ours and between them opened six pull requests nobody wanted:
+#
+#   - gitsubmodule tracks libs/hbb_common, which is upstream's submodule. Its
+#     pointer should move when we merge RustDesk, not on a daily bot schedule
+#     that would silently desync the submodule from the tree that expects it.
+#   - github-actions cannot be scoped to a subset of .github/workflows, so it
+#     swept RustDesk's build workflows -- now disabled in this repository -- and
+#     proposed bumps to actions that never run here. Re-add it if the odv-*
+#     workflows are ever worth watching on their own; accept that it will bump
+#     the upstream files too.
 version: 2
 updates:
-  - package-ecosystem: "gitsubmodule"
-    directory: "/"
-    target-branch: "master"
-    schedule:
-      interval: "daily"
-    commit-message:
-      prefix: "Git submodule"
-    labels:
-      - "dependencies"
-
   # The platform API. Grouped so a routine patch sweep is one pull request
   # rather than a dozen; security updates still arrive on their own.
   - package-ecosystem: "gomod"
@@ -52,15 +55,3 @@ updates:
         update-types:
           - "minor"
           - "patch"
-
-  # The workflows themselves. actions/checkout and friends are pinned by major
-  # tag, which is a moving target; this at least surfaces when a major lands.
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    target-branch: "master"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "CI"
-    labels:
-      - "dependencies"

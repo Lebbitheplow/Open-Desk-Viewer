@@ -59,7 +59,11 @@ sweep() {
   } \
     | sed 's#/$##' \
     | filter_non_endpoints \
-    | sort -u
+    | LC_ALL=C sort -u
+    # LC_ALL=C is load-bearing. A UTF-8 locale collates punctuation as though it
+    # were absent, so /api/ab/peer/{id} and /api/ab/peers swap places between a
+    # developer machine (en_US.UTF-8) and the runner. The sweep then reports an
+    # identical set as drift, and --check fails on every pull request.
 }
 
 # filter_non_endpoints drops the matches that are documentation URLs rather than
