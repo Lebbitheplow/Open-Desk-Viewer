@@ -103,3 +103,6 @@ platform/caddy_config/
 *~
 Thumbs.db
 .direnv/
+
+# Development plans and tracking documents
+plans/
