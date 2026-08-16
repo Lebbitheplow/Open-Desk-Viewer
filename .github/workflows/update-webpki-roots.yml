@@ -11,12 +11,8 @@ name: Update webpki-roots
 # branch, to run CI on it.
 
 on:
-  # Disabled in this fork alongside the other upstream workflows. Worth
-  # reconsidering rather than deleting: it refreshes the compiled-in TLS roots,
-  # which still matters to the client builds odv-linux/windows/android produce.
-  # Re-enable by uncommenting if those go to real users.
-  # schedule:
-  #   - cron: "0 3 * * 1"
+  schedule:
+    - cron: "0 3 * * 1"
   workflow_dispatch:
 
 # A manual dispatch overlapping the weekly run would race it force-pushing

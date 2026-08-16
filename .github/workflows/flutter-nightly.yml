@@ -1,15 +1,9 @@
 name: Flutter Nightly Build
 
 on:
-  # Disabled in this fork. Upstream's nightly builds the full RustDesk release
-  # matrix; here it would burn Actions minutes producing artifacts nobody
-  # consumes. Left as workflow_dispatch so it can still be run by hand.
-  # GitHub never registered this workflow (it has no run history), so it cannot
-  # be turned off through the Actions API -- commenting the trigger is the only
-  # lever that works.
-  # schedule:
-  #   # schedule build every night
-  #   - cron: "0 0 * * *"
+  schedule:
+    # schedule build every night
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
