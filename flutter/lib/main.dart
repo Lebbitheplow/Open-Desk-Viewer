@@ -120,18 +120,247 @@ Future<void> main(List<String> args) async {
   }
 }
 
+// The boot arguments that name which deployment this client belongs to, mapped
+// onto the config key each one writes.
+const _kPreConfigOptions = <String, String>{
+  '--id-server=': 'custom-rendezvous-server',
+  '--api-server=': 'api-server',
+  '--relay-server=': 'relay-server',
+  '--key=': 'key',
+};
+
+// Passed alongside the values above to change an already-configured client.
+const _kPreConfigOverwriteArg = '--overwrite-settings';
+
+// The enrollment token is provisioned the same way but is deliberately not one
+// of the four above. It names no server, so it cannot re-point a client; it is
+// spent and cleared by src/hbbs_http/sync.rs on first use; and it has to reach a
+// client whose deployment is already baked in at build time, which the guard
+// below would otherwise treat as "already configured" and refuse.
+const _kPreConfigEnrollmentArg = '--enrollment-token=';
+const _kEnrollmentTokenOption = 'enrollment-token';
+const _kDeviceTokenOption = 'device-token';
+
+/// Applies deployment settings passed on the command line.
+///
+/// These four keys decide which server the client trusts, so anything able to
+/// start the binary with arguments could previously re-point an installed
+/// client at another deployment, silently and permanently: the old version
+/// wrote every matching argument straight into the config with no validation
+/// and no regard for what was already there.
+///
+/// The rule now is first-run only. An unconfigured client takes its settings
+/// from the arguments, which is what provisioning needs. A client that already
+/// knows its deployment keeps it unless the operator also passes
+/// --overwrite-settings, which makes re-pointing a deliberate act rather than a
+/// side effect of launching with an extra flag.
 Future<void> applyPreConfig() async {
-  for (var arg in kBootArgs) {
-    if (arg.startsWith('--id-server=')) {
-      await bind.mainSetOption(key: 'custom-rendezvous-server', value: arg.substring(12));
-    } else if (arg.startsWith('--api-server=')) {
-      await bind.mainSetOption(key: 'api-server', value: arg.substring(13));
-    } else if (arg.startsWith('--relay-server=')) {
-      await bind.mainSetOption(key: 'relay-server', value: arg.substring(15));
-    } else if (arg.startsWith('--key=')) {
-      await bind.mainSetOption(key: 'key', value: arg.substring(6));
+  final requested = <String, String>{};
+  var overwrite = false;
+
+  for (final arg in kBootArgs) {
+    if (arg == _kPreConfigOverwriteArg) {
+      overwrite = true;
+      continue;
+    }
+    if (arg.startsWith(_kPreConfigEnrollmentArg)) {
+      final value = arg.substring(_kPreConfigEnrollmentArg.length).trim();
+      if (_isValidPreConfigValue(_kEnrollmentTokenOption, value)) {
+        requested[_kEnrollmentTokenOption] = value;
+      } else {
+        debugPrint('applyPreConfig: ignoring $_kPreConfigEnrollmentArg, '
+            'value is not usable');
+      }
+      continue;
+    }
+    for (final entry in _kPreConfigOptions.entries) {
+      if (!arg.startsWith(entry.key)) continue;
+      final value = arg.substring(entry.key.length).trim();
+      if (!_isValidPreConfigValue(entry.value, value)) {
+        debugPrint('applyPreConfig: ignoring ${entry.key}, value is not usable');
+        continue;
+      }
+      requested[entry.value] = value;
     }
   }
+
+  // An APK installed by an MDM or baked into a firmware image is launched by an
+  // Intent and never sees a command line, so managed configuration is the only
+  // provisioning channel it has. It wins over boot arguments because on that
+  // platform it is the authoritative one.
+  requested.addAll(await _managedConfig());
+
+  // Before the enrollment token, deliberately: enrollment is where the serial
+  // becomes the device's name, and a serial recorded after the fact would leave
+  // the device named its RustDesk id until somebody renamed it by hand.
+  await _recordSerial();
+  await _applyEnrollmentToken(requested.remove(_kEnrollmentTokenOption));
+  await _enableStartOnBoot();
+
+  if (requested.isEmpty) return;
+
+  // Configured means the client already knows its deployment, whether from an
+  // earlier run or from settings baked into the build.
+  final rendezvous =
+      (await bind.mainGetOption(key: 'custom-rendezvous-server')).trim();
+  final apiServer = (await bind.mainGetOption(key: 'api-server')).trim();
+  final configured = rendezvous.isNotEmpty || apiServer.isNotEmpty;
+
+  for (final entry in requested.entries) {
+    final current = (await bind.mainGetOption(key: entry.key)).trim();
+    // Re-running provisioning with the same values is not a change, so it does
+    // not need consent.
+    if (current == entry.value) continue;
+
+    if (configured && !overwrite) {
+      debugPrint('applyPreConfig: refusing to change ${entry.key}; this client '
+          'is already configured. Pass $_kPreConfigOverwriteArg to override.');
+      continue;
+    }
+    await bind.mainSetOption(key: entry.key, value: entry.value);
+  }
+}
+
+/// Reads Android managed configuration, keyed by config name.
+///
+/// The keys are the config keys themselves rather than argument spellings, so
+/// what an MDM administrator types matches what the client stores. See
+/// android/app/src/main/res/xml/app_restrictions.xml, which is the list an MDM
+/// console offers them.
+Future<Map<String, String>> _managedConfig() async {
+  if (!isAndroid) return const {};
+  final allowed = {
+    ..._kPreConfigOptions.values,
+    _kEnrollmentTokenOption,
+  };
+  try {
+    // platformFFI rather than gFFI, whose invokeMethod is declared Future<bool>
+    // and would fail the cast on a map.
+    final raw = await platformFFI.invokeMethod(AndroidChannel.kGetManagedConfig);
+    if (raw is! Map) return const {};
+    final out = <String, String>{};
+    raw.forEach((key, value) {
+      if (key is! String || value is! String) return;
+      if (!allowed.contains(key)) return;
+      final trimmed = value.trim();
+      if (!_isValidPreConfigValue(key, trimmed)) {
+        debugPrint('applyPreConfig: ignoring managed config $key, '
+            'value is not usable');
+        return;
+      }
+      out[key] = trimmed;
+    });
+    return out;
+  } catch (err) {
+    debugPrint('applyPreConfig: managed configuration unavailable: $err');
+    return const {};
+  }
+}
+
+/// Stores an enrollment token, but only while the client is still unenrolled.
+///
+/// A token is spent on redemption and cleared by the Rust side, so re-writing
+/// one on a device that already holds a device credential would leave a live
+/// credential sitting in the config of every deployed device for no gain. This
+/// deliberately does not consult the already-configured guard: a build with its
+/// deployment baked in is configured by definition, and refusing the token there
+/// would mean no locked build could ever enrol.
+Future<void> _applyEnrollmentToken(String? token) async {
+  if (token == null) return;
+  final deviceToken = (await bind.mainGetOption(key: _kDeviceTokenOption)).trim();
+  if (deviceToken.isNotEmpty) {
+    debugPrint('applyPreConfig: ignoring enrollment token; this client is '
+        'already enrolled');
+    return;
+  }
+  final current =
+      (await bind.mainGetOption(key: _kEnrollmentTokenOption)).trim();
+  if (current == token) return;
+  await bind.mainSetOption(key: _kEnrollmentTokenOption, value: token);
+}
+
+// The identifier a technician searches by, read by src/hbbs_http/sync.rs and
+// sent at enrollment.
+const _kSerialOption = 'odv-serial';
+
+/// Records the device's serial number, once.
+///
+/// The value comes from the platform: on Android an MDM asset tag, then the
+/// hardware serial, then ANDROID_ID (see common.kt:deviceSerial). Elsewhere
+/// there is no source and the field stays empty, which the server accepts.
+///
+/// Written once rather than refreshed: the serial is what the device is named
+/// after and what a technician searches on, so a value that moved would break
+/// the association the moment it mattered.
+Future<void> _recordSerial() async {
+  if (!isAndroid) return;
+  final current = (await bind.mainGetOption(key: _kSerialOption)).trim();
+  if (current.isNotEmpty) return;
+  try {
+    final serial = await platformFFI.invokeMethod(AndroidChannel.kGetDeviceSerial);
+    if (serial is! String || serial.trim().isEmpty) return;
+    await bind.mainSetOption(key: _kSerialOption, value: serial.trim());
+  } catch (err) {
+    debugPrint('applyPreConfig: could not read the device serial: $err');
+  }
+}
+
+// Marks that provisioning has already had its one chance to turn start on boot
+// on, so an operator who turns it back off keeps that decision.
+const _kStartOnBootProvisionedOption = 'odv-start-on-boot-provisioned';
+
+/// Turns on start on boot for a client that belongs to a deployment.
+///
+/// Android's receiver defaults this to false, and nothing set it, so a
+/// preconfigured client stayed off after every reboot until somebody opened the
+/// app and toggled it. That is the one thing an unattended deployment cannot
+/// ask for.
+///
+/// Done once rather than on every launch: this is provisioning, not policy, and
+/// re-asserting it would silently undo an operator who turned it off.
+Future<void> _enableStartOnBoot() async {
+  if (!isAndroid) return;
+  final already =
+      (await bind.mainGetOption(key: _kStartOnBootProvisionedOption)).trim();
+  if (already == 'Y') return;
+
+  // Only for a client that knows which deployment it belongs to. An unlocked
+  // build is somebody's own copy and gets upstream's behaviour.
+  final rendezvous =
+      (await bind.mainGetOption(key: 'custom-rendezvous-server')).trim();
+  final apiServer = (await bind.mainGetOption(key: 'api-server')).trim();
+  if (rendezvous.isEmpty && apiServer.isEmpty) return;
+
+  try {
+    await platformFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, true);
+    await bind.mainSetOption(key: _kStartOnBootProvisionedOption, value: 'Y');
+  } catch (err) {
+    debugPrint('applyPreConfig: could not enable start on boot: $err');
+  }
+}
+
+bool _isValidPreConfigValue(String key, String value) {
+  if (value.isEmpty) return false;
+  // Whitespace and control characters cannot appear in a host, a URL or a
+  // public key, and are how one argument becomes two config entries.
+  if (value.contains(RegExp(r'[\s\x00-\x1f]'))) return false;
+
+  if (key == 'api-server') {
+    final uri = Uri.tryParse(value);
+    if (uri == null || !uri.isAbsolute) return false;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+    if (uri.scheme == 'http') {
+      // Not refused: a lab deployment on a private network is a legitimate
+      // case. It is called out because the heartbeat response carries
+      // config_options, so plain HTTP here is a channel that can reprogram
+      // this client.
+      debugPrint('applyPreConfig: api-server is plain HTTP, so the heartbeat '
+          'response that can rewrite this client\'s configuration is not '
+          'protected in transit');
+    }
+  }
+
+  return true;
 }
 
 Future<void> initEnv(String appType) async {

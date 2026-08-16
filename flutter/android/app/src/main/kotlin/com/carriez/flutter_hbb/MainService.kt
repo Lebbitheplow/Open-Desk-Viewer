@@ -339,7 +339,8 @@ class MainService : Service() {
         if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
             createForegroundNotification()
 
-            if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
+            val fromBoot = intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)
+            if (fromBoot) {
                 FFI.startService()
             }
             Log.d(logTag, "service starting: ${startId}:${Thread.currentThread()}")
@@ -352,11 +353,41 @@ class MainService : Service() {
                 checkMediaPermission()
                 _isReady = true
             } ?: let {
-                Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
-                requestMediaProjection()
+                if (fromBoot) {
+                    // A boot start carries no projection token, and asking for
+                    // one puts the system consent dialog in front of whoever
+                    // happens to be holding the device -- on every reboot, on a
+                    // fleet whose whole premise is that the customer is not
+                    // involved. Nobody is standing there to answer it either, so
+                    // the dialog would sit on screen until somebody dismissed it.
+                    //
+                    // Screen capture on a device with no user is a property of
+                    // the image, not of this code: it needs the app installed as
+                    // a privileged or device-owner app, which is what
+                    // platform/README.md's deployment spec requires. The device
+                    // still reports in and is manageable; it is capture that is
+                    // unavailable, so this says so where an operator will find
+                    // it rather than failing silently.
+                    Log.w(logTag, "started from boot with no MediaProjection token, and not asking for one: a consent dialog needs somebody at the device. Screen capture stays unavailable until the app is provisioned as a privileged or device-owner app. Input control is separate and needs the accessibility service enabled in the image.")
+                } else {
+                    Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
+                    requestMediaProjection()
+                }
             }
         }
-        return START_NOT_STICKY // don't use sticky (auto restart), the new service (from auto restart) will lose control
+        // D.5, decided: keep upstream's START_NOT_STICKY.
+        //
+        // A restarted service is handed no projection token, so a sticky restart
+        // produces exactly the state above: a running service that cannot
+        // capture, and now without the boot path's reason for existing. It would
+        // look alive in the notification tray while being useless, which is
+        // worse for an unattended fleet than being plainly gone: the platform
+        // already notices a device that stops heartbeating
+        // (device_connectivity_events, and the notification targets that
+        // watch them), and the boot receiver brings it back at the next restart.
+        // A WorkManager keepalive was considered and rejected for the same
+        // reason -- it could restart the process, not the consent it lost.
+        return START_NOT_STICKY
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

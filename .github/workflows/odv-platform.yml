@@ -2,22 +2,43 @@ name: Platform CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'platform/**'
+      - '.github/client-api-surface.txt'
       - '.github/workflows/odv-platform.yml'
       - '.github/scripts/check-client-config.sh'
+      - '.github/scripts/client-api-sweep.sh'
   pull_request:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'platform/**'
+      - '.github/client-api-surface.txt'
       - '.github/workflows/odv-platform.yml'
       - '.github/scripts/check-client-config.sh'
+      - '.github/scripts/client-api-sweep.sh'
 
 jobs:
-  build-and-test:
-    name: Build, test, and verify
+  api:
+    name: API build and test
     runs-on: ubuntu-22.04
+
+    # The integration suite needs a real PostgreSQL. A service container is
+    # ready before the first step runs, so there is no sleep to get wrong.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: odv
+          POSTGRES_PASSWORD: odvtest
+          POSTGRES_DB: odv
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U odv -d odv"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout
@@ -26,14 +47,11 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          # Must satisfy the go directive in platform/api/go.mod.
+          go-version-file: platform/api/go.mod
+          cache-dependency-path: platform/api/go.sum
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Install dependencies
+      - name: Download dependencies
         working-directory: platform/api
         run: go mod download
 
@@ -49,34 +67,106 @@ jobs:
         working-directory: platform/api
         run: go test ./...
 
-      - name: Check client configuration
-        run: |
-          bash .github/scripts/check-client-config.sh
+      # The schema is applied by the embedded migration runner, the same one the
+      # API uses at startup, so a migration that does not apply cleanly fails
+      # here rather than in production.
+      - name: Integration tests against PostgreSQL
+        working-directory: platform/api
+        run: go test ./internal/integration/ -v
         env:
-          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
-          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
-          API_SERVER: ${{ vars.API_SERVER }}
-          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+          ODV_TEST_DB: '1'
+          ODV_TEST_PG_HOST: 127.0.0.1
+          ODV_TEST_PG_PORT: '55432'
+          ODV_TEST_PG_DB: odv
+          ODV_TEST_PG_USER: odv
+          ODV_TEST_PG_PASSWORD: odvtest
 
-      - name: Check docker-compose
-        run: |
-          cd platform
-          docker compose config
-
-      - name: Test portal build
-        working-directory: platform/web
-        run: |
-          npm ci
-          npm run build
-
-      - name: Run Go tests with database
+      # Pinned rather than @latest. @latest makes the build depend on whatever
+      # was published this morning, which is both a supply-chain surface and a
+      # source of failures unrelated to the commit under test. The vulnerability
+      # database is fetched at run time regardless, so pinning the tool does not
+      # pin the findings: a new CVE still fails this step tomorrow.
+      - name: Vulnerability scan
         working-directory: platform/api
         run: |
-          docker run -d --name odv-test-db -e POSTGRES_PASSWORD=odvtest -e POSTGRES_USER=odv -e POSTGRES_DB=odv -p 55432:5432 postgres:16-alpine
-          sleep 5
-          psql -h localhost -p 55432 -U odv -d odv < migrations/000001_initial_schema.up.sql
-          psql -h localhost -p 55432 -U odv -d odv < migrations/000002_address_book.up.sql
-          ODV_TEST_DB=1 go test ./internal/integration/ -v
-          docker stop odv-test-db
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
+
+  portal:
+    name: Portal build and test
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: platform/web/package-lock.json
+
+      - name: Install
+        working-directory: platform/web
+        run: npm ci
+
+      # Before this step existed the lint script could not run at all: there
+      # was no ESLint config anywhere in platform/web, so `npm run lint` failed
+      # with "couldn't find a configuration file" and nothing noticed, because
+      # nothing called it.
+      - name: Lint
+        working-directory: platform/web
+        run: npm run lint
+
+      - name: Build
+        working-directory: platform/web
+        run: npm run build
+
+      - name: Test
+        working-directory: platform/web
+        run: npm test
+
+  deployment:
+    name: Deployment and client configuration
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # check-client-config.sh deliberately does not run here. It guards a client
+      # build, and this job builds no client: it ran here for months reporting
+      # success over four variables nothing consumed, while the workflows that do
+      # build APKs never set them. It now runs in odv-android, odv-linux and
+      # odv-windows, where there is an artifact to check it against.
+
+      # The client's API surface is a closed set. If an upstream merge
+      # introduces a new endpoint, this fails the build instead of the endpoint
+      # being discovered months later. The sweep script explains how the
+      # baseline is derived and what to do when it changes.
+      - name: Client API surface has not drifted
+        run: bash .github/scripts/client-api-sweep.sh --check
+
+      - name: Check docker-compose
+        working-directory: platform
+        run: docker compose config
         env:
-          PGPASSWORD: odvtest
+          PUBLIC_HOST: example.com
+          POSTGRES_DB: odv
+          POSTGRES_USER: odv
+          POSTGRES_PASSWORD: ci-placeholder
+          OIDC_CLIENT_SECRET: ci-placeholder
+          JWT_SECRET: ci-placeholder
+          RUSTDESK_PUBLIC_KEY: ci-placeholder
+          API_BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+          KEYCLOAK_ADMIN_PASSWORD: ci-placeholder
+          KEYCLOAK_DB_PASSWORD: ci-placeholder
+          # Both are declared with the ${VAR:?message} form in the compose file,
+          # so leaving them out here would fail this step rather than being
+          # silently substituted with an empty string. That is the point of the
+          # form, and it is why they are listed rather than defaulted.
+          POSTGRES_APP_PASSWORD: ci-placeholder
+          DEVICE_PASSWORD_KEY: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=

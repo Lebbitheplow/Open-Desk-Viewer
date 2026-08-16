@@ -1,5 +1,4 @@
 {
-  "id": "opendeskviewer",
   "realm": "opendeskviewer",
   "displayName": "OpenDeskViewer",
   "displayNameHtml": "<div class=\"kc-logo-text\"><span>OpenDeskViewer</span></div>",
@@ -14,12 +13,11 @@
   "resetPasswordAllowed": true,
   "bruteForceProtected": true,
   "permanentLockout": false,
-  "maxLoginFailureWaitSeconds": 900,
+  "maxFailureWaitSeconds": 900,
   "failureFactor": 10,
   "actionTokenGeneratedByAdminLifespan": 43200,
   "actionTokenGeneratedByUserLifespan": 300,
   "requiredCredentials": ["password"],
-  "providers": [],
   "loginTheme": "keycloak",
   "accountTheme": "keycloak",
   "adminTheme": "keycloak",
@@ -27,124 +25,117 @@
   "internationalizationEnabled": true,
   "defaultLocale": "en",
   "supportedLocales": ["en"],
-  "sslRealmRelativeUrl": "protocol/openid-connect",
-  "smtpServer": {},
-  "issuer": "http://${keycloak.host}:8080/realms/opendeskviewer",
-  
+
   "clients": [
     {
       "clientId": "odv-api",
       "name": "OpenDeskViewer API",
-      "description": "Backend API client for RustDesk Pro compatibility",
-      "type": "confidential",
+      "description": "Backend API client. Confidential; used for server-to-server calls to Keycloak.",
       "protocol": "openid-connect",
       "enabled": true,
       "publicClient": false,
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "fullScopeAllowed": true,
       "protocolMappers": [
-        {
-          "name": "audience",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-audience-mapper",
-          "config": {
-            "included.client.audience": "odv-api",
-            "id.token.claim": true,
-            "access.token.claim": true
-          }
-        },
         {
           "name": "roles",
           "protocol": "openid-connect",
           "protocolMapper": "oidc-usermodel-realm-role-mapper",
           "config": {
-            "id.token.claim": true,
-            "access.token.claim": true,
+            "id.token.claim": "true",
+            "access.token.claim": "true",
             "claim.name": "roles",
             "jsonType.label": "String",
-            "multivalued": true
+            "multivalued": "true"
           }
         }
-      ],
-      "fullScopeAllowed": true,
-      "directAccessGrantsEnabled": true,
-      "secret": "${keycloak.api.client.secret}"
+      ]
     },
     {
       "clientId": "odv-portal",
       "name": "OpenDeskViewer Portal",
-      "description": "Frontend portal for web interface",
-      "type": "public",
+      "description": "Browser portal. Public client using authorization code with PKCE.",
       "protocol": "openid-connect",
       "enabled": true,
       "publicClient": true,
-      "protocolMappers": [
-        {
-          "name": "audience",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-audience-mapper",
-          "config": {
-            "included.client.audience": "odv-portal",
-            "id.token.claim": true
-          }
-        },
-        {
-          "name": "role list",
-          "protocol": "openid-connect",
-          "protocolMapper": "oidc-usermodel-realm-role-mapper",
-          "config": {
-            "id.token.claim": true,
-            "access.token.claim": true,
-            "claim.name": "roles",
-            "jsonType.label": "String",
-            "multivalued": true
-          }
-        }
-      ],
-      "fullScopeAllowed": false,
       "standardFlowEnabled": true,
-      "directAccessGrantsEnabled": true,
-      "rootUrl": "${portal.url}",
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "baseUrl": "/",
       "redirectUris": [
-        "${portal.url}/*"
+        "/*"
       ],
       "webOrigins": [
         "+"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true"
+          }
+        },
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "odv-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
       ]
     }
   ],
-  
-  "users": [],
-  
+
+  "users": [
+    {
+      "username": "service-account-odv-api",
+      "enabled": true,
+      "serviceAccountClientId": "odv-api",
+      "clientRoles": {
+        "realm-management": ["manage-users", "view-users"]
+      }
+    }
+  ],
+
   "roles": {
     "realm": [
       {
-        "id": "administrator",
         "name": "Administrator",
         "description": "Full system access - can manage all users, devices, and settings"
       },
       {
-        "id": "support-manager",
         "name": "Support Manager",
         "description": "Can manage technicians and customers, view all devices"
       },
       {
-        "id": "technician",
         "name": "Technician",
         "description": "Can access devices assigned to their support groups and connect remotely"
       },
       {
-        "id": "read-only",
         "name": "Read Only",
         "description": "Can view devices and reports but cannot make changes"
       }
     ]
   },
-  
+
   "groups": [],
-  
-  "defaultRoles": ["read-only"],
-  
-  "realmRoles": ["Administrator", "Support Manager", "Technician", "Read Only"],
-  
+
   "browserSecurityHeaders": {
     "contentSecurityPolicy": "frame-src 'self'; frame-ancestors 'self'; img-src 'self' data:; script-src 'self'; style-src 'self';",
     "xContentTypeOptions": "nosniff",
@@ -153,26 +144,25 @@
     "cacheControl": "no-store",
     "xFrameOptions": "SAMEORIGIN"
   },
-  
+
   "ssoSessionIdleTimeout": 3600,
   "ssoSessionMaxLifespan": 36000,
   "offlineSessionIdleTimeout": 2592000,
   "offlineSessionMaxLifespanEnabled": false,
   "offlineSessionMaxLifespan": 5184000,
-  
+
   "accessCodeLifespan": 60,
   "accessCodeLifespanLogin": 600,
   "accessCodeLifespanUserAction": 300,
-  
+
+  "eventsEnabled": true,
   "enabledEventTypes": [
     "LOGIN",
     "LOGIN_ERROR",
-    "EXPORTED",
     "LOGOUT",
     "LOGOUT_ERROR"
   ],
-  
-  "eventsEnabled": false,
   "eventsListeners": ["jboss-logging"],
-  "enabledEventListeners": ["jboss-logging"]
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": false
 }

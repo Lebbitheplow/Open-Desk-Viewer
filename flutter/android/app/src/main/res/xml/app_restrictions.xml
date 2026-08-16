@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  OpenDeskViewer managed configuration.
+
+  This is the list an MDM console offers an administrator, and it is the only
+  provisioning channel a preinstalled or MDM-deployed client has: it is started
+  by an Intent and never sees the boot arguments the desktop client uses.
+
+  The keys are the client's own config keys, so what is typed here is what the
+  client stores. A build with its deployment baked in needs only
+  enrollment-token; the four server keys are the fallback for an unlocked build.
+-->
+<restrictions xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <restriction
+        android:key="enrollment-token"
+        android:restrictionType="string"
+        android:title="Enrollment token"
+        android:description="Token issued by the management portal. Redeemed once at first contact and then cleared, so a cloned image cannot enrol twice."
+        android:defaultValue="" />
+
+    <restriction
+        android:key="serial-number"
+        android:restrictionType="string"
+        android:title="Serial number or asset tag"
+        android:description="The identifier technicians search this device by. Preferred over the hardware serial, which an ordinary app cannot read on Android 10 and later. Left empty, the client falls back to the hardware serial if it is readable, then to ANDROID_ID."
+        android:defaultValue="" />
+
+    <restriction
+        android:key="api-server"
+        android:restrictionType="string"
+        android:title="API server"
+        android:description="Management API base URL, for example https://odv.example.com. Ignored on a build that already has its deployment baked in."
+        android:defaultValue="" />
+
+    <restriction
+        android:key="custom-rendezvous-server"
+        android:restrictionType="string"
+        android:title="ID server"
+        android:description="Rendezvous server host. Ignored on a build that already has its deployment baked in."
+        android:defaultValue="" />
+
+    <restriction
+        android:key="relay-server"
+        android:restrictionType="string"
+        android:title="Relay server"
+        android:description="Relay server host. Ignored on a build that already has its deployment baked in."
+        android:defaultValue="" />
+
+    <restriction
+        android:key="key"
+        android:restrictionType="string"
+        android:title="Server public key"
+        android:description="Deployment public key. Ignored on a build that already has its deployment baked in."
+        android:defaultValue="" />
+
+</restrictions>

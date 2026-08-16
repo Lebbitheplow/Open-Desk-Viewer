@@ -8,6 +8,24 @@ RUN npm ci || npm install
 
 COPY . .
 
+# Vite inlines import.meta.env at build time, so these have to arrive as build
+# args. Supplying them as container environment does nothing: by then the bundle
+# is already written and VITE_OIDC_ISSUER is undefined, which leaves
+# src/auth/config.ts with an empty authority and sign-in permanently broken.
+ARG VITE_API_URL=/api/v1
+ARG VITE_OIDC_ISSUER
+ARG VITE_OIDC_CLIENT_ID=odv-portal
+
+ENV VITE_API_URL=$VITE_API_URL \
+    VITE_OIDC_ISSUER=$VITE_OIDC_ISSUER \
+    VITE_OIDC_CLIENT_ID=$VITE_OIDC_CLIENT_ID
+
+# Fail the build rather than shipping a portal that cannot reach an issuer.
+RUN test -n "$VITE_OIDC_ISSUER" || { \
+        echo "VITE_OIDC_ISSUER build arg is required; the portal cannot sign anyone in without it" >&2; \
+        exit 1; \
+    }
+
 RUN npm run build
 
 FROM nginx:alpine
@@ -39,7 +57,10 @@ EOF
 
 EXPOSE 80
 
+# 127.0.0.1 rather than localhost: busybox wget resolves localhost to ::1 first
+# and nginx's `listen 80` binds IPv4 only, so the check would always be refused
+# and the container would never report healthy.
 HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:80/ || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:80/ || exit 1
 
 CMD ["nginx", "-g", "daemon off;"]

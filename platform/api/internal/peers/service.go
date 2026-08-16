@@ -16,8 +16,8 @@ import (
 // deterministically and keeps the result at one row per device, which is what
 // the COUNT queries assume.
 const peerColumns = `
-	SELECT d.id, d.name, COALESCE(d.hostname, ''), COALESCE(d.os, ''), d.state,
-	       d.last_seen_at, dg.id, dg.name, c.id, c.name
+	SELECT d.id, d.rustdesk_id, d.name, COALESCE(d.hostname, ''), COALESCE(d.os, ''),
+	       d.state, d.connectivity, d.last_seen_at, dg.id, dg.name, c.id, c.name
 	FROM devices d
 	LEFT JOIN LATERAL (
 	    SELECT g.id, g.name
@@ -46,11 +46,17 @@ const accessiblePredicate = `
 
 // Peer represents a device
 type Peer struct {
-	ID            uuid.UUID
+	ID uuid.UUID
+	// RustdeskID is the id the client connects to. It is not interchangeable
+	// with ID: /api/peers used to return the internal uuid here, which the
+	// client stores as its connect target, so every device in a technician's
+	// Devices list was unreachable.
+	RustdeskID    string
 	Name          string
 	Hostname      string
 	OS            string
 	State         string
+	Connectivity  string
 	LastSeenAt    *time.Time
 	GroupName     *string
 	UserName      *string
@@ -113,8 +119,9 @@ func (s *Service) ListAccessiblePeers(ctx context.Context, userID int64, offset,
 	for rows.Next() {
 		var peer Peer
 		if err := rows.Scan(
-			&peer.ID, &peer.Name, &peer.Hostname, &peer.OS, &peer.State,
-			&peer.LastSeenAt, &peer.DeviceGroupID, &peer.GroupName,
+			&peer.ID, &peer.RustdeskID, &peer.Name, &peer.Hostname, &peer.OS,
+			&peer.State, &peer.Connectivity, &peer.LastSeenAt,
+			&peer.DeviceGroupID, &peer.GroupName,
 			&peer.CustomerID, &peer.UserName,
 		); err != nil {
 			return nil, 0, fmt.Errorf("failed to scan peer: %w", err)
@@ -132,10 +139,10 @@ func (s *Service) ListAccessiblePeers(ctx context.Context, userID int64, offset,
 // ListDeviceGroups retrieves all device groups accessible by a user
 func (s *Service) ListDeviceGroups(ctx context.Context, userID int64, current, pageSize int64) ([]DeviceGroup, int64, error) {
 	offset := (current - 1) * pageSize
-	
+
 	var rows pgx.Rows
 	var total int64
-	
+
 	err := s.db.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT dg.id)
 		FROM device_groups dg
@@ -146,7 +153,7 @@ func (s *Service) ListDeviceGroups(ctx context.Context, userID int64, current, p
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to count device groups: %w", err)
 	}
-	
+
 	rows, err = s.db.Query(ctx, `
 		SELECT DISTINCT dg.id, dg.name
 		FROM device_groups dg

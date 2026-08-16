@@ -7,7 +7,6 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.util.Log
-import android.widget.Toast
 import com.hjq.permissions.XXPermissions
 import io.flutter.embedding.android.FlutterActivity
 
@@ -27,8 +26,13 @@ class BootReceiver : BroadcastReceiver() {
                 return
             }
             // check pre-permission
+            //
+            // Both are special-access grants rather than runtime dialogs, so on a
+            // managed device they come from the MDM policy or the firmware image.
+            // Logged at warn rather than debug: this is the failure that leaves a
+            // fleet silently offline after a power cut, and it has to be findable.
             if (!XXPermissions.isGranted(context, REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, SYSTEM_ALERT_WINDOW)){
-                Log.d(logTag, "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS or SYSTEM_ALERT_WINDOW is not granted")
+                Log.w(logTag, "not starting on boot: REQUEST_IGNORE_BATTERY_OPTIMIZATIONS or SYSTEM_ALERT_WINDOW is not granted. On a managed device these are granted by the MDM policy or the system image.")
                 return
             }
 
@@ -36,7 +40,6 @@ class BootReceiver : BroadcastReceiver() {
                 action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
                 putExtra(EXT_INIT_FROM_BOOT, true)
             }
-            Toast.makeText(context, "RustDesk is Open", Toast.LENGTH_LONG).show()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 context.startForegroundService(it)
             } else {

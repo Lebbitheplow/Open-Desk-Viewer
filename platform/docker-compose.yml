@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # ========== PostgreSQL ==========
   postgres:
@@ -9,8 +7,19 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Consumed by the init script below, not by Postgres itself.
+      KEYCLOAK_DB_NAME: ${KEYCLOAK_DB_NAME:-keycloak}
+      KEYCLOAK_DB_USER: ${KEYCLOAK_DB_USER:-keycloak}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
+      # Likewise. This is the password of odv_app, the non-owning role the API
+      # serves requests as; migration 000008 grants it its privileges.
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Creates the separate role and database Keycloak connects to. Postgres
+      # only runs these on an empty data directory, so an existing deployment
+      # needs the role and database created by hand.
+      - ../platform/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -24,25 +33,43 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:23.0.0
     container_name: opendeskviewer-keycloak
-    command: start --features=preview
+    # --import-realm is what actually reads the mounted realm file. Without it
+    # the realm, its clients and its roles never exist and every sign-in fails.
+    # The import only runs while the realm is absent, so it is safe to leave on.
+    command: start --import-realm
     environment:
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-change_me_in_production}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?KEYCLOAK_ADMIN_PASSWORD is required}
       KC_DB: postgres
-      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
-      KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: keycloak_password
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KEYCLOAK_DB_NAME:-keycloak}
+      KC_DB_USERNAME: ${KEYCLOAK_DB_USER:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?KEYCLOAK_DB_PASSWORD is required}
       KC_HTTP_PORT: 8080
+      # `start` refuses to boot without TLS key material unless HTTP is enabled
+      # explicitly. TLS is terminated by Caddy, so Keycloak speaks HTTP on the
+      # internal network only and trusts the proxy's forwarded headers.
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY: edge
+      KC_HEALTH_ENABLED: "true"
       KC_HOSTNAME: ${PUBLIC_HOST:-localhost}
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
     volumes:
-      - ../platform/keycloak/realm-opendeskviewer.json:/opt/keycloak/data/import/realm-opendeskviewer.json
+      - ../platform/keycloak/realm-opendeskviewer.json:/opt/keycloak/data/import/realm-opendeskviewer.json:ro
+    # The Keycloak image ships neither curl nor wget, so the check is written
+    # against bash's /dev/tcp. Asking for the realm's discovery document rather
+    # than /health also proves the import succeeded.
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8080/realms/opendeskviewer/.well-known/openid-configuration || exit 1"]
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/8080 &&
+          printf 'GET /realms/%s/.well-known/openid-configuration HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' "${KEYCLOAK_REALM:-opendeskviewer}" >&3 &&
+          grep -q '200 OK' <&3
       interval: 15s
       timeout: 10s
-      retries: 10
+      retries: 20
+      start_period: 60s
     networks:
       - opendeskviewer-network
     depends_on:
@@ -57,12 +84,14 @@ services:
     command: hbbs -r hbbr:21117 -k _
     volumes:
       - hbbs_data:/data
+    # 21115 NAT type test, 21116 rendezvous (TCP and UDP), 21118 websocket.
+    # 21117 belongs to hbbr and must not be published here: both services
+    # binding it makes `docker compose up` fail on "port is already allocated".
     ports:
       - "${RENDEZVOUS_PORT:-21116}:${RENDEZVOUS_PORT:-21116}"
       - "${RENDEZVOUS_PORT:-21116}:${RENDEZVOUS_PORT:-21116}/udp"
       - "21115:21115"
       - "21118:21118"
-      - "21117:21117"
     networks:
       - opendeskviewer-network
     restart: unless-stopped
@@ -87,12 +116,31 @@ services:
       context: ../platform/api
       dockerfile: Dockerfile
     container_name: opendeskviewer-api
+    # The explicit list below only covers a fraction of what internal/config
+    # reads, so settings such as CORS_ORIGINS, AUDIT_RETENTION_DAYS and the
+    # DEVICE_* timeouts would be documented in .env and then never reach the
+    # process. env_file forwards the rest. The environment entries win over
+    # env_file, which is what keeps the internal-network addresses below
+    # correct even when .env names the public host.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      # The bundled postgres is on the private compose network and has no
+      # certificate, so TLS is off here. The code defaults to require, which is
+      # what an external managed database gets; overriding it is a decision made
+      # per deployment, in one place, rather than a constant in the source.
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-disable}
+      # POSTGRES_USER above is the schema owner and is used only to run
+      # migrations. Requests are served as odv_app, which cannot modify or
+      # delete an audit row, cannot TRUNCATE one away, and cannot disable the
+      # trigger that says so.
+      - POSTGRES_APP_PASSWORD=${POSTGRES_APP_PASSWORD}
       - KEYCLOAK_HOST=keycloak
       - KEYCLOAK_PORT=8080
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-opendeskviewer}
@@ -101,11 +149,18 @@ services:
       - PUBLIC_HOST=${PUBLIC_HOST}
       - RUSTDESK_PUBLIC_KEY=${RUSTDESK_PUBLIC_KEY}
       - JWT_SECRET=${JWT_SECRET}
+      # No default. An unset key fails the API's startup validation, which is
+      # the intended outcome: a placeholder would give every deployment that
+      # forgot to set one the same key.
+      - DEVICE_PASSWORD_KEY=${DEVICE_PASSWORD_KEY}
       - OIDC_CLIENT_ID=${OIDC_CLIENT_API:-odv-api}
       - OIDC_CLIENT_SECRET=${OIDC_CLIENT_SECRET}
-      - OIDC_ISSUER=http://keycloak:8080/realms/${KEYCLOAK_REALM:-opendeskviewer}
+      # The public realm URL, because that is what Keycloak puts in every
+      # token's iss claim. The JWKS is still fetched over the internal network,
+      # from KEYCLOAK_HOST above.
+      - OIDC_ISSUER=https://${PUBLIC_HOST:-localhost}/realms/${KEYCLOAK_REALM:-opendeskviewer}
       - API_BOOTSTRAP_ADMIN_EMAIL=${API_BOOTSTRAP_ADMIN_EMAIL}
-       - DEBUG=${DEBUG:-false}
+      - DEBUG=${DEBUG:-false}
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8000/healthz"]
       interval: 10s
@@ -128,12 +183,16 @@ services:
       dockerfile: Dockerfile.worker
       target: worker
     container_name: opendeskviewer-worker
+    env_file:
+      - path: .env
+        required: false
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=${POSTGRES_DB}
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_SSLMODE=${POSTGRES_SSLMODE:-disable}
       - DEBUG=${DEBUG:-false}
       - WORKER_INTERVAL_HEARTBEAT_CHECK_SECONDS=${WORKER_INTERVAL_HEARTBEAT_CHECK_SECONDS:-60}
       - WORKER_INTERVAL_TOKEN_CLEANUP_HOURS=${WORKER_INTERVAL_TOKEN_CLEANUP_HOURS:-24}
@@ -147,14 +206,16 @@ services:
 
   # ========== Web Portal ==========
   web:
+    # Vite inlines VITE_* at build time, so these have to be build args. Setting
+    # them as runtime environment does nothing: the bundle is already written.
     build:
       context: ../platform/web
       dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+        VITE_OIDC_ISSUER: https://${PUBLIC_HOST:-localhost}/realms/${KEYCLOAK_REALM:-opendeskviewer}
+        VITE_OIDC_CLIENT_ID: ${OIDC_CLIENT_PORTAL:-odv-portal}
     container_name: opendeskviewer-web
-    environment:
-      - VITE_API_URL=/api/v1
-      - VITE_OIDC_ISSUER=https://${PUBLIC_HOST:-localhost}/realms/${KEYCLOAK_REALM:-opendeskviewer}
-      - VITE_OIDC_CLIENT_ID=odv-portal
     networks:
       - opendeskviewer-network
     depends_on:
@@ -166,6 +227,13 @@ services:
   caddy:
     image: caddy:2-alpine
     container_name: opendeskviewer-caddy
+    # The Caddyfile reads {$PUBLIC_HOST}, which is resolved inside the container.
+    # Without this the site address is empty and Caddy serves nothing.
+    environment:
+      PUBLIC_HOST: ${PUBLIC_HOST:-localhost}
+      # Optional. Empty means an anonymous ACME account, which is fine for a
+      # localhost deployment and not for a public one.
+      CADDY_ACME_EMAIL: ${CADDY_ACME_EMAIL:-}
     volumes:
       - ../platform/Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data

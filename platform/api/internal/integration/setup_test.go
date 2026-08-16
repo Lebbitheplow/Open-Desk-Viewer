@@ -5,9 +5,10 @@
 //
 //	docker run -d --name odv-test -e POSTGRES_PASSWORD=odvtest -e POSTGRES_USER=odv \
 //	    -e POSTGRES_DB=odv -p 55432:5432 postgres:16-alpine
-//	psql < platform/migrations/00001_initial_schema.up.sql
-//	psql < platform/migrations/00002_address_book.up.sql
 //	ODV_TEST_DB=1 go test ./internal/integration/
+//
+// The schema is applied by the same embedded migration runner the API uses at
+// startup, so these tests fail if a migration does not apply cleanly.
 //
 // These exist because the queries they cover compiled fine while being wrong:
 // columns that do not exist, a uuid joined to a bigint, and placeholders that
@@ -20,9 +21,38 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/OpenDeskViewer/platform/api/internal/devicepw"
+	"github.com/OpenDeskViewer/platform/api/internal/migrations"
 	"github.com/OpenDeskViewer/platform/api/internal/postgres"
 	"github.com/google/uuid"
 )
+
+// testDevicePasswordKey is a fixed 32-byte AES key, base64 encoded. Fixed
+// rather than random so a failing test can be reproduced, and confined to this
+// package: config.ValidateAPI requires a real one, and a deployment reusing
+// this value would have every device password readable by anyone with the
+// source.
+const testDevicePasswordKey = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
+// newDevicePasswords builds the password service the way cmd/api builds it.
+func newDevicePasswords(t *testing.T, f *fixture) *devicepw.Service {
+	t.Helper()
+
+	key, err := devicepw.ParseKey(testDevicePasswordKey)
+	if err != nil {
+		t.Fatalf("test device password key does not parse: %v", err)
+	}
+	svc, err := devicepw.New(f.db, key)
+	if err != nil {
+		t.Fatalf("failed to build the device password service: %v", err)
+	}
+	return svc
+}
+
+// testPrinter routes migration progress into the test log.
+type testPrinter struct{ t *testing.T }
+
+func (p testPrinter) Printf(format string, v ...any) { p.t.Logf(format, v...) }
 
 // fixture is the seeded world the tests assert against.
 type fixture struct {
@@ -34,6 +64,12 @@ type fixture struct {
 
 	group1 uuid.UUID // support group tech1 belongs to
 	group2 uuid.UUID // support group tech2 belongs to
+
+	// The customer and device groups the seeded devices belong to. Enrollment
+	// tokens name both, so the device-facing tests need them.
+	customer     uuid.UUID
+	deviceGroup1 uuid.UUID
+	deviceGroup2 uuid.UUID
 
 	// device1..device3 are in group1, device4 is in group2, and discovered is in
 	// group1 but not yet claimed.
@@ -64,13 +100,20 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatalf("invalid ODV_TEST_PG_PORT: %v", err)
 	}
 
+	host := envOr("ODV_TEST_PG_HOST", "127.0.0.1")
+	dbName := envOr("ODV_TEST_PG_DB", "odv")
+	user := envOr("ODV_TEST_PG_USER", "odv")
+	password := envOr("ODV_TEST_PG_PASSWORD", "odvtest")
+
+	// Apply the schema the same way the API does, so a migration that does not
+	// apply cleanly fails here rather than in production.
+	dsn := postgres.DSN(host, port, dbName, user, password, "disable")
+	if err := migrations.Run(dsn, testPrinter{t}); err != nil {
+		t.Fatalf("failed to apply migrations: %v", err)
+	}
+
 	ctx := context.Background()
-	db, err := postgres.New(ctx,
-		envOr("ODV_TEST_PG_HOST", "127.0.0.1"), port,
-		envOr("ODV_TEST_PG_DB", "odv"),
-		envOr("ODV_TEST_PG_USER", "odv"),
-		envOr("ODV_TEST_PG_PASSWORD", "odvtest"),
-	)
+	db, err := postgres.New(ctx, host, port, dbName, user, password, "disable")
 	if err != nil {
 		t.Fatalf("failed to connect: %v", err)
 	}
@@ -90,7 +133,22 @@ func (f *fixture) reset(t *testing.T) {
 		         device_group_members, support_group_device_groups,
 		         user_support_groups, user_roles,
 		         devices, device_groups, support_groups,
-		         locations, customers, users
+	         enrollment_tokens, device_credentials, device_observations,
+	         device_disconnect_requests, device_strategies, device_passwords,
+	         device_connectivity_events, notification_deliveries, notification_targets,
+		         locations, customers, users,
+		         -- Cascaded from users, but listed so the intent survives a
+		         -- schema change that drops the foreign key.
+		         client_sessions,
+		         -- Cascaded only for rows that already name a user; a sign-in
+		         -- that has not reached its callback yet has a NULL user_id and
+		         -- would survive into the next test.
+		         oidc_auth_requests,
+		         -- Not reachable by CASCADE since migration 000006 dropped
+		         -- its foreign keys to make it append-only. TRUNCATE is the one
+		         -- way to clear it: the append-only trigger is FOR EACH ROW on
+		         -- DELETE, and TRUNCATE does not fire row triggers.
+		         audit_events
 		RESTART IDENTITY CASCADE
 	`)
 	if err != nil {
@@ -158,9 +216,11 @@ func (f *fixture) seed(t *testing.T) {
 	var customer uuid.UUID
 	if err := f.db.QueryRow(ctx, `
 		INSERT INTO customers (name, code) VALUES ('Acme', 'ACME') RETURNING id
-	`).Scan(&customer); err != nil {
+	`).Scan(&f.customer); err != nil {
 		t.Fatalf("failed to create customer: %v", err)
 	}
+
+	customer = f.customer
 
 	var deviceGroup1, deviceGroup2 uuid.UUID
 	if err := f.db.QueryRow(ctx, `
@@ -173,6 +233,7 @@ func (f *fixture) seed(t *testing.T) {
 	`).Scan(&deviceGroup2); err != nil {
 		t.Fatalf("failed to create device group: %v", err)
 	}
+	f.deviceGroup1, f.deviceGroup2 = deviceGroup1, deviceGroup2
 
 	if err := f.db.QueryRow(ctx, `
 		INSERT INTO support_groups (name) VALUES ('Team One') RETURNING id

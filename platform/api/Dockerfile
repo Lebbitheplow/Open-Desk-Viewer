@@ -1,4 +1,6 @@
-FROM golang:1.23-alpine AS builder
+# Must satisfy the go directive in go.mod, which is 1.25.0. A lower toolchain
+# refuses the module outright.
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 
@@ -19,7 +21,6 @@ RUN apk --no-cache add ca-certificates
 WORKDIR /app
 
 COPY --from=builder /build/api .
-COPY --from=builder /build/migrations ./migrations
 
 EXPOSE 8000
 

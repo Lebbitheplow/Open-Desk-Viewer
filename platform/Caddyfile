@@ -1,8 +1,60 @@
 {
     admin off
+
+    # ACME account email. Let's Encrypt uses it for expiry warnings and to
+    # reach an operator before a certificate problem becomes an outage. Empty
+    # is valid and means an anonymous account, which is what a localhost
+    # deployment with a self-signed certificate wants.
+    # Quoted, because an unset variable expands to no argument at all and Caddy
+    # then fails to parse the directive rather than treating it as absent.
+    email "{$CADDY_ACME_EMAIL:}"
 }
 
-${PUBLIC_HOST:-localhost} {
+# Caddy's environment syntax is {$VAR} with {$VAR:default}, not the shell's
+# ${VAR:-default}. The shell form is not substituted at all, and Caddy then
+# tries to parse the literal text as a site address and fails on the port.
+{$PUBLIC_HOST:localhost} {
+  # Response headers for everything this site serves, set once at the edge so a
+  # new route cannot be added without them. -Server strips Caddy's own banner.
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "DENY"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Cross-Origin-Opener-Policy "same-origin"
+    Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+    -Server
+  }
+
+  # The content policy applies to our own surfaces only. Keycloak's login pages
+  # ship their own policy and their own inline script, so imposing script-src
+  # 'self' on /realms/* would break sign-in, which is the one page that has to
+  # work. Everything else is a Vite bundle and a same-origin API, neither of
+  # which loads third-party script or wants to be framed.
+  #
+  # 'unsafe-inline' appears on style-src because the portal's stylesheet is
+  # injected at runtime. Scripts get no such exemption, which is what makes the
+  # policy worth having.
+  #
+  # frame-ancestors 'none' and X-Frame-Options both appear on purpose: the CSP
+  # directive is what modern browsers honour, the header is what older ones do.
+  @notkeycloak not path /realms/* /resources/* /js/*
+  header @notkeycloak Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+
+  # Keycloak. The portal's issuer is https://${PUBLIC_HOST}/realms/<realm>, so
+  # the browser reaches Keycloak through this host and not directly. Without
+  # this route the discovery document 404s and sign-in can never start.
+  # /resources and /js serve the login theme's own assets.
+  #
+  # /admin is deliberately absent: the administration console is not exposed to
+  # the internet. Reach it with `docker compose port keycloak 8080` or an SSH
+  # tunnel.
+  @keycloak path /realms/* /resources/* /js/*
+  reverse_proxy @keycloak http://keycloak:8080 {
+    header_up Host {host}
+    header_up X-Real-IP {remote_host}
+  }
+
   # API gateway for /api/v1/* (our REST API) - must come before /api*
   reverse_proxy /api/v1* http://api:8000 {
     header_up X-Forwarded-Proto {scheme}
@@ -29,10 +81,27 @@ ${PUBLIC_HOST:-localhost} {
   }
 }
 
-21114 {
-  # Plain HTTP API endpoint for clients that derive API URL from rendezvous server
-  reverse_proxy /api* http://api:8000 {
-    header_up X-Forwarded-Proto http
-    header_up X-Real-IP {remote_host}
-  }
+# Port 21114 is where a RustDesk client looks when it was given a rendezvous
+# host but no api-server: it derives <host>:21114 by decrementing the rendezvous
+# port by two. This block used to proxy the entire /api surface here in the
+# clear.
+#
+# That was not merely plaintext exposure. The stock client applies
+# strategy.config_options from a heartbeat *response* straight into its own
+# config (src/hbbs_http/sync.rs:263-268, 287-304) and persists it via
+# Config::set_options, which includes custom-rendezvous-server, api-server and
+# key. Anyone on the path could answer one plaintext heartbeat and permanently
+# re-point every device that reached this port.
+#
+# Now it only redirects. 308 rather than 301 so the client repeats the request
+# method and body rather than turning a POST into a GET, and the strategy is
+# therefore only ever served over TLS.
+#
+# This is a mitigation, not a cure. A client provisioned without api-server
+# still sends its first request here in the clear, so its body is exposed even
+# though the reply is not. Provisioning must set api-server to an https URL;
+# see NewAuditHandler and the note on the Windows filename route in
+# internal/rustdeskapi/audit.go.
+:21114 {
+  redir https://{$PUBLIC_HOST:localhost}{uri} 308
 }

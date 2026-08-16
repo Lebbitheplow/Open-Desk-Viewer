@@ -51,7 +51,9 @@ type SQLResolver struct {
 	cfg *config.Config
 }
 
-// NewSQLResolver creates a new Casbin resolver
+// NewSQLResolver creates a resolver that answers authorisation questions with
+// SQL against the support group and device group tables. The Resolver interface
+// stays as the extension point if that ever needs to change.
 func NewSQLResolver(db *postgres.Pool, cfg *config.Config) *SQLResolver {
 	return &SQLResolver{db: db, cfg: cfg}
 }

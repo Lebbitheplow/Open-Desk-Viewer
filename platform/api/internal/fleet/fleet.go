@@ -86,12 +86,26 @@ func NewService(db *postgres.Pool, cfg *config.Config) *Service {
 }
 
 // GetDeviceByRustdeskID retrieves a device by its RustDesk ID
+// deviceColumns is the select list every Device scan uses.
+//
+// last_seen_at, client_version, os and hostname are nullable columns read into
+// non-pointer Go fields, so a row where any of them is NULL fails to scan. That
+// is every device the moment it is registered: RegisterDevice writes none of
+// them, so the first heartbeat inserted the row and then errored on reading it
+// back, and every heartbeat after that errored the same way. Device telemetry
+// could never have worked. COALESCE here rather than pointer fields, because
+// the callers all want a value and 'epoch' reads correctly as "never seen" in
+// the staleness comparison.
+const deviceColumns = `
+		d.id, d.rustdesk_id, d.name, d.uuid, d.customer_id, d.location_id,
+		d.serial_number, d.state, d.connectivity,
+		COALESCE(d.last_seen_at, 'epoch'::timestamptz),
+		COALESCE(d.client_version, ''), COALESCE(d.os, ''), COALESCE(d.hostname, ''),
+		d.created_at, d.updated_at`
+
 func (s *Service) GetDeviceByRustdeskID(ctx context.Context, rustdeskID string) (*Device, error) {
 	row := s.db.QueryRow(ctx, `
-		SELECT d.id, d.rustdesk_id, d.name, d.uuid, d.customer_id, d.location_id,
-		       d.serial_number, d.state, d.connectivity, d.last_seen_at,
-		       d.client_version, d.os, d.hostname,
-		       d.created_at, d.updated_at
+		SELECT `+deviceColumns+`
 		FROM devices d
 		WHERE d.rustdesk_id = $1
 	`, rustdeskID)
@@ -224,10 +238,7 @@ func (s *Service) GetDeviceAccessibleByUser(ctx context.Context, userID int64) (
 // SearchDevices searches devices by name, hostname, or serial
 func (s *Service) SearchDevices(ctx context.Context, query string, limit int) ([]Device, error) {
 	rows, err := s.db.Query(ctx, `
-		SELECT d.id, d.rustdesk_id, d.name, d.uuid, d.customer_id, d.location_id,
-		       d.serial_number, d.state, d.connectivity, d.last_seen_at,
-		       d.client_version, d.os, d.hostname,
-		       d.created_at, d.updated_at
+		SELECT `+deviceColumns+`
 		FROM devices d
 		WHERE d.name ILIKE $1 OR d.hostname ILIKE $1 OR d.serial_number ILIKE $1
 		ORDER BY d.name

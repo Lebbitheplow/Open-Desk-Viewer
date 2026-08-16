@@ -1,75 +1,88 @@
-# OpenDeskViewer Android Build
+# OpenDeskViewer Android client
 
-This directory contains Android-specific configuration for the OpenDeskViewer rebranded Flutter app.
+The client is built from the Flutter/Rust tree at the repository root. This directory holds the
+Android-specific deployment material: the signing key template and this note.
 
-## Prerequisites
+For what a firmware image or MDM console has to provide, see the **Deploying the client** section
+of `platform/README.md`. That is the deployment contract; this is the build.
 
-- Flutter 3.22.3
-- Android SDK with NDK r28c
-- Rust 1.75
-- cargo-ndk 3.1.2
+## Toolchain
 
-## Build Requirements
+The versions that matter are pinned in `.github/workflows/odv-android.yml` and are the ones a
+local build should match. As of now:
 
-The Android build requires:
-1. Flutter environment with Android SDK
-2. NDK r28c for Rust compilation
-3. vcpkg at pinned commit for native dependencies
+| Piece | Version |
+|---|---|
+| Flutter | 3.24.0 |
+| Rust | 1.82.0 |
+| NDK | r28c |
+| cargo-ndk | 3.1.2 |
+| flutter_rust_bridge_codegen | 1.80.1, matching the `=1.80` pin in `Cargo.toml` |
+| vcpkg | the commit in `VCPKG_COMMIT_ID` |
 
-## Build Steps
+The workflow is the source of truth. This table is a convenience and has been wrong before: it
+said Flutter 3.22.3 and Rust 1.75 against a workflow that pinned neither.
 
-### Local Build
+## Building
+
+`flutter build apk` alone is not enough: the APK loads `librustdesk.so`, which nothing in the
+Flutter build produces. In order:
 
 ```bash
-cd flutter
-flutter build apk --release --obfuscate --split-debug-info=../build/app
+# Native dependencies (libvpx, libyuv, opus, aom, oboe), per ABI
+./flutter/build_android_deps.sh arm64-v8a
+
+# The generated bridge. generated_bridge.dart is gitignored, and
+# `dart run build_runner` is not this project's generator.
+flutter_rust_bridge_codegen --rust-input ./src/flutter_ffi.rs \
+    --dart-output ./flutter/lib/generated_bridge.dart
+
+# librustdesk.so, into the jniLibs directory the APK reads
+./flutter/ndk_arm64.sh
+mkdir -p flutter/android/app/src/main/jniLibs/arm64-v8a
+cp target/aarch64-linux-android/release/liblibrustdesk.so \
+   flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so
+
+cd flutter && flutter build apk --release --target-platform android-arm64
 ```
 
-### CI Build
+The deployment identity is compiled in from `ODV_RENDEZVOUS_SERVER`, `ODV_RELAY_SERVER`,
+`ODV_API_SERVER` and `ODV_RS_PUB_KEY`. A build without them produces a client that points at
+RustDesk's own servers. `.github/scripts/check-client-config.sh --verify` greps the shared object
+inside the built APK for the baked-in API server and fails if it is not there, which is the only
+check that says the compiler actually saw the variables.
 
-The CI workflow at `.github/workflows/odv-android.yml` handles:
-- NDK setup (r28c)
-- Rust toolchain (1.75)
-- vcpkg dependencies (ffmpeg, aom, libvpx, opus, oboe)
-- Flutter codegen bridge
-- Signing with release keystore
+## Naming, and what is deliberately still called RustDesk
 
-## Signing Configuration
+Two different names are in play, and conflating them is what the old `rebrand.sh` did.
 
-Create `flutter/android/key.properties` with:
+**The customer-visible name is OpenDeskViewer.** `app_name` in
+`flutter/android/app/src/main/res/values/strings.xml`, referenced by `android:label` in the
+manifest, plus `applicationId "com.opendeskviewer.client"` in `app/build.gradle`. That covers the
+launcher, the app info screen, the accessibility settings entry and the id an MDM addresses.
 
-```properties
-storePassword=your-store-password
-keyPassword=your-key-password
-keyAlias=odv-key
-storeFile=../android/keys/odv-key.jks
-```
+**The protocol-level name is still RustDesk, on purpose.** `config::APP_NAME` stays `"RustDesk"`,
+which means:
 
-## Deep Linking
+- the deep link stays `rustdesk://`, which is what `POST /api/v1/devices/{id}/connect` returns and
+  what the manifest registers. Changing one end without the other breaks the technician's
+  click-to-connect, and changing both buys nothing the requirements ask for;
+- the on-disk config paths keep their names;
+- `common.rs:is_custom_client()` stays false, which is correct: it gates upstream's signed
+  custom-client config feature, which this deployment does not use.
 
-The app supports `rustdesk://` deep links. The scheme is auto-derived from the app name.
+**The Kotlin package stays `com.carriez.flutter_hbb`.** The Rust calls into `MainService`,
+`InputService` and `FFI` through JNI by fully qualified class name. `rebrand.sh` moved that
+directory in place, which produces a build that compiles and fails at runtime; it was also called
+by no workflow and seded an `android:label="flutter_hbb"` the manifest has never had. It was
+deleted rather than fixed: `applicationId` and a string resource do the whole job declaratively.
 
-## APK Output
+## Signing
 
-Build output: `flutter/build/app/outputs/flutter-apk/app-release.apk`
+CI signs from `ANDROID_SIGNING_KEY`, `ANDROID_ALIAS`, `ANDROID_KEY_STORE_PASSWORD` and
+`ANDROID_KEY_PASSWORD`. With none set the workflow raises a warning annotation and uploads a
+debug-signed APK, which is fine for a look and useless for a deployment: an MDM cannot push an
+update whose signing identity changed, and a firmware preinstall needs the key decided before the
+image is cut.
 
-## Distribution
-
-Signed APKs can be distributed via:
-- Direct download from your server
-- Internal app stores
-- Enterprise distribution platforms
-
-## Troubleshooting
-
-### Build fails with NDK errors
-Ensure NDK r28c is installed:
-```bash
-sdkmanager "ndk;28.0.13004108"
-```
-
-### vcpkg errors
-Use the pinned vcpkg commit from flutter-build.yml
-
-### Signing errors
-Verify `key.properties` path and keystore file exist
+For a local release build, copy `key.properties.example` to `flutter/android/key.properties`.

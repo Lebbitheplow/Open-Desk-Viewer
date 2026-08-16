@@ -58,3 +58,48 @@ libsciter.dylib
 flutter/web/
 # libdrmtap is cloned at build time by build.py (not a submodule)
 /third_party/libdrmtap/
+# ==============================================================================
+# OpenDeskViewer platform. Everything above this line is upstream RustDesk's.
+# ==============================================================================
+
+# The React portal: installed dependencies and build output.
+platform/web/node_modules/
+platform/web/dist/
+platform/web/coverage/
+platform/web/.vite/
+# Vitest and ESLint caches. Both are per-machine and both are large.
+platform/web/.eslintcache
+
+# The Go API and worker. `go build -o opendeskviewer ./cmd/api` is the command
+# in platform/README.md, and cmd/worker builds beside it; both land in the
+# module root by default and neither belongs in the repository.
+platform/api/opendeskviewer
+platform/api/worker
+platform/api/*.test
+platform/api/coverage.out
+platform/api/coverage.html
+
+# Deployment secrets. `.env` alone is matched at any depth by the entry further
+# up this file, but the variants a developer actually creates are not, and
+# platform/.env holds DEVICE_PASSWORD_KEY, POSTGRES_APP_PASSWORD and the
+# database credentials.
+.env.local
+.env.*.local
+*.env
+!.env.example
+!platform/.env.example
+
+# Local stack state. `docker compose` keeps volumes outside the tree, but a
+# bind-mounted run or a manual dump does not.
+platform/**/data/
+platform/caddy_data/
+platform/caddy_config/
+*.sql.gz
+*.dump
+
+# Editor and operating system leavings beyond the upstream list above.
+*.swp
+*.swo
+*~
+Thumbs.db
+.direnv/

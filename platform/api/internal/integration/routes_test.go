@@ -42,8 +42,8 @@ func newABServer(t *testing.T, f *fixture, userID int64) *abServer {
 
 	token := fmt.Sprintf("session-token-%d", userID)
 	_, err := f.db.Exec(context.Background(), `
-		INSERT INTO client_sessions (user_id, rustdesk_token, expires_at)
-		VALUES ($1, $2, now() + interval '1 hour')
+		INSERT INTO client_sessions (user_id, token_hash, expires_at)
+		VALUES ($1, encode(sha256($2::bytea), 'hex'), now() + interval '1 hour')
 	`, userID, token)
 	if err != nil {
 		t.Fatalf("failed to create a session: %v", err)

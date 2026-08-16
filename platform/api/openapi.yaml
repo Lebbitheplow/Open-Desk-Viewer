@@ -42,7 +42,15 @@ paths:
   /api/login:
     post:
       summary: User login
-      description: Login with username and password. Only supports OIDC-brokered login.
+      description: >
+        Exchanges a validated Keycloak token, sent as `secret`, for a session.
+        This is where the client's browser sign-in ends up.
+
+
+        A username and a password are refused with 400: password sign-in is not
+        enabled, and migration 000012 dropped the credential store behind it,
+        because nothing could ever write a credential to it. Identity lives in
+        Keycloak.
       operationId: postLogin
       tags:
         - Auth
@@ -58,6 +66,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LoginResponse'
+        '400':
+          description: Password sign-in is not enabled; use single sign-on
 
   /api/logout:
     post:
@@ -93,81 +103,153 @@ paths:
 
   /api/oidc/auth:
     post:
-      summary: Start OIDC authorization
-      description: Begins the authorization-code+PKCE flow against Keycloak.
+      summary: Start a browser sign-in
+      description: >-
+        The RustDesk client cannot host a redirect URI, so it asks for a URL and
+        a polling handle, opens the URL in the user's browser, and then polls
+        /api/oidc/auth-query until the browser half finishes.
+
+        The exchange runs as the public odv-portal client with PKCE. No client
+        secret is involved anywhere in this flow: the code verifier is what
+        proves the exchange belongs to the party that started it.
       operationId: postOidcAuth
       tags:
         - OIDC
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
               properties:
-                client_id:
+                op:
                   type: string
-                  example: odv-portal
-                redirect_uri:
+                  description: The identity provider the client picked. Recorded, not branched on; this deployment has one.
+                id:
                   type: string
-                  example: http://localhost:8080/oidc/callback
-                code_verifier:
+                  description: The client's RustDesk id. The poll must present the same one.
+                uuid:
                   type: string
+                  description: The client's machine uuid. Likewise.
               required:
-                - client_id
-                - redirect_uri
-                - code_verifier
+                - id
+                - uuid
       responses:
         '200':
-          description: Authorization URL and state
+          description: The polling handle and the URL to open in a browser
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  auth_url:
+                  code:
                     type: string
-                    description: Keycloak authorization URL
-                  state:
+                    description: The polling handle. Sent to /api/oidc/auth-query; only its SHA-256 is stored.
+                  url:
                     type: string
-                    description: OAuth2 state for PKCE
+                    description: Keycloak's authorization endpoint with state and a PKCE S256 challenge.
                 required:
-                  - auth_url
-                  - state
+                  - code
+                  - url
+        '400':
+          description: Missing id or uuid
+        '405':
+          description: Method not allowed
 
   /api/oidc/auth-query:
     get:
-      summary: Check OIDC auth status
-      description: Poll to check if the authorization code exchange completed.
+      summary: Collect a finished browser sign-in
+      description: >-
+        Answers 200 with {"error": "No authed oidc is found"} while the browser
+        half has not finished. The client matches that string exactly and keeps
+        polling; any other message ends its loop with a failure, so it is a
+        contract rather than a wording choice.
+
+        Once the callback has completed, this mints and returns a session token.
+        A completed sign-in is collectable once.
       operationId: getOidcAuthQuery
       tags:
         - OIDC
       parameters:
-        - name: state
-          in: query
-          required: true
-          schema:
-            type: string
         - name: code
           in: query
           required: true
           schema:
             type: string
+        - name: id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: query
+          required: true
+          schema:
+            type: string
       responses:
         '200':
-          description: Auth query result
+          description: Either the session, or the pending marker
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: string
-                    enum: [pending, success, failure]
-                  token:
-                    type: string
-                    description: Session token if successful
-                required:
-                  - status
+                oneOf:
+                  - type: object
+                    properties:
+                      access_token:
+                        type: string
+                      type:
+                        type: string
+                        enum: [access_token]
+                      user:
+                        $ref: '#/components/schemas/UserPayload'
+                  - type: object
+                    properties:
+                      error:
+                        type: string
+                        enum: ["No authed oidc is found"]
+        '403':
+          description: The account is disabled
+        '405':
+          description: Method not allowed
+
+  /api/oidc/callback:
+    get:
+      summary: Where Keycloak sends the browser
+      description: >-
+        Not called by the client. Verifies the state against a sign-in this
+        server started, exchanges the authorization code with PKCE, validates
+        the returned token against the same issuer and audience every other
+        route requires, and records which user authenticated. Renders a page
+        telling the user to return to the application; it carries no token.
+      operationId: getOidcCallback
+      tags:
+        - OIDC
+      parameters:
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: An HTML page, sign-in complete or cancelled
+          content:
+            text/html:
+              schema:
+                type: string
+        '400':
+          description: A missing, unknown or expired state
+        '401':
+          description: The token returned by the identity provider failed validation
+        '502':
+          description: The identity provider refused the exchange
 
   # ========== Address Book (ab) ==========
 
@@ -812,10 +894,17 @@ paths:
   /api/audit/conn:
     post:
       summary: Record connection audit
-      description: Client reports connection start/end.
+      description: >-
+        Records one connection session. The actor is taken from the bearer
+        token, never from the body, and the device must be one the caller can
+        reach: a user_id in the body is ignored and an unreachable or unknown
+        device is 403. The device may be named by its RustDesk id (the stock
+        client's "id") or by our uuid ("device_id").
       operationId: postAuditConn
       tags:
         - Audit
+      security:
+        - bearerAuth: []
       requestBody:
         content:
           application/json:
@@ -824,46 +913,79 @@ paths:
               properties:
                 id:
                   type: string
-                uuid:
+                  description: The device's RustDesk id, as the stock client sends it.
+                device_id:
                   type: string
-                peer_id:
+                  description: The device, by RustDesk id or by uuid. Takes precedence over id.
+                action:
                   type: string
-                  description: Remote device ID
+                  enum: [new, close]
+                  description: Stock-client form of status. close maps to ENDED.
+                conn_id:
+                  type: integer
+                  format: int64
                 session_id:
+                  type: integer
+                  format: int64
+                  description: The client's session id, an unsigned 64-bit value.
+                ip:
+                  type: string
+                  description: Fallback for connected_from.
+                support_group_id:
                   type: string
                   format: uuid
-                username:
+                  description: >-
+                    Stored only if the caller belongs to it, or is an
+                    administrator. Any other value is dropped, not rejected.
+                client_id:
                   type: string
-                platform:
+                protocol:
                   type: string
-                event:
+                start_time:
                   type: string
-                  enum: [start, end]
-                conn_id:
+                  format: date-time
+                  description: RFC 3339. Defaults to now.
+                end_time:
                   type: string
-                conn_type:
+                  format: date-time
+                duration_seconds:
+                  type: integer
+                connected_from:
                   type: string
-                  enum: [direct, relay]
-                gateway_id:
+                status:
                   type: string
-              required:
-                - id
-                - uuid
-                - peer_id
-                - session_id
-                - username
-                - platform
-                - event
+                  enum: [REQUESTED, STARTED, ENDED, FAILED]
       responses:
         '200':
           description: Audit event recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guid:
+                    type: string
+                    format: uuid
+                required:
+                  - guid
+        '400':
+          description: Missing device, unparseable timestamp, or a status outside the enum
+        '401':
+          description: No authenticated user
+        '403':
+          description: The device is unknown to this deployment, or not reachable by the caller
 
   /api/audit/file:
     post:
       summary: Record file transfer audit
+      description: >-
+        Same authorisation rules as /api/audit/conn. The actor comes from the
+        token and the device must be reachable by the caller.
       operationId: postAuditFile
       tags:
         - Audit
+      security:
+        - bearerAuth: []
       requestBody:
         content:
           application/json:
@@ -872,30 +994,30 @@ paths:
               properties:
                 id:
                   type: string
-                peer_id:
+                  description: The device's RustDesk id.
+                device_id:
                   type: string
-                session_id:
+                  description: The device, by RustDesk id or by uuid. Takes precedence over id.
+                file_name:
                   type: string
-                username:
+                direction:
                   type: string
-                platform:
+                file_path:
                   type: string
-                event:
+                size:
+                  type: integer
+                  format: int64
+                timestamp:
                   type: string
-                path:
-                  type: string
-                to_username:
-                  type: string
-              required:
-                - id
-                - peer_id
-                - session_id
-                - username
-                - platform
-                - event
       responses:
         '200':
           description: File audit event recorded
+        '400':
+          description: Missing device
+        '401':
+          description: No authenticated user
+        '403':
+          description: The device is unknown to this deployment, or not reachable by the caller
 
   # ========== Device Deployment (optional - for managed clients) ==========
 
@@ -969,9 +1091,9 @@ paths:
                 - username
                 - platform
                 - command
-       responses:
-         '200':
-           description: CLI command sent
+      responses:
+        '200':
+          description: CLI command sent
 
   /api/record:
     post:
@@ -1041,6 +1163,1893 @@ paths:
         '501':
           description: Plugin signing verification is not enabled
 
+  # ==========================================================================
+  # /api/v1: the management surface the React portal uses.
+  #
+  # Separate from the paths above, which exist to satisfy the RustDesk client's
+  # fixed contract. These shapes may change with the product; the client's may
+  # not. Every path here is on the protected mux and every list returns the
+  # {total, current, pageSize, totalPages, data} envelope.
+  # ==========================================================================
+
+  /api/v1/stats/dashboard:
+    get:
+      summary: Fleet summary and the ten most recent connections
+      description: >
+        Counts are scoped by access.Resolver: an administrator sees the fleet,
+        a technician sees only the devices their support groups reach.
+      operationId: getDashboard
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Dashboard payload
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  stats:
+                    $ref: '#/components/schemas/PortalStats'
+                  recent_connections:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PortalSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/devices:
+    get:
+      summary: List devices
+      operationId: listDevices
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: >-
+            Substring match on device name, hostname or serial number. Name and
+            hostname are trigram-indexed; serial is not, so prefer the `serial`
+            parameter when the exact value is known.
+          schema:
+            type: string
+        - name: serial
+          in: query
+          description: >-
+            Exact serial number or asset tag. This is how an external system
+            turns an identifier it already holds into a device id before
+            renaming the device with PATCH /api/v1/devices/{id}.
+          schema:
+            type: string
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [DISCOVERED, ACTIVE, DISABLED, DECOMMISSIONED]
+        - name: customer
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: group
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of devices
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalDevice'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/devices/{id}:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      summary: Device detail, including sysinfo and group memberships
+      operationId: getDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The device
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalDeviceDetail'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    patch:
+      summary: Rename a device or move it to another customer or location
+      operationId: updateDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                customer_id:
+                  type: string
+                location_id:
+                  type: string
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete a device
+      operationId: deleteDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/devices/{id}/claim:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      summary: Claim a DISCOVERED device, making it ACTIVE
+      description: >
+        Only a DISCOVERED device can be claimed. Claiming an already-active
+        device returns 409 rather than silently reassigning it, because that
+        would bypass the reassignment path that revokes the old access.
+      operationId: claimDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customer_id:
+                  type: string
+                  format: uuid
+                location_id:
+                  type: string
+                name:
+                  type: string
+              required:
+                - customer_id
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '409':
+          description: The device is not awaiting claim
+
+  /api/v1/devices/{id}/reassign:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      summary: Move a device to another customer
+      description: >
+        Transactional. Updates the customer and location, clears the device's
+        group memberships and applies the supplied ones, and writes the audit
+        event, all in one transaction. A partial reassignment would leave the
+        device reachable by two customers at once.
+      operationId: reassignDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customer_id:
+                  type: string
+                  format: uuid
+                location_id:
+                  type: string
+                device_group_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+              required:
+                - customer_id
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/devices/{id}/connect:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      summary: Get the rustdesk:// URI for a device
+      description: >
+        The URI carries no password. A permanent credential in a URL lands in
+        browser history, and this deployment has no short-lived credential
+        store, so the client prompts instead.
+      operationId: connectDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The connect URI
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uri:
+                    type: string
+                    example: rustdesk://connect/100000001
+                  rustdesk_id:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/devices/{id}/sessions:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/Current'
+      - $ref: '#/components/parameters/PageSize'
+    get:
+      summary: Connections involving this device
+      operationId: listDeviceSessions
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: A page of sessions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalSession'
+
+  /api/v1/devices/{id}/disconnect:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      summary: End live sessions on this device
+      description: >-
+        Queues a disconnect for the device's next heartbeat. It is not
+        immediate: the client polls every 15 seconds, applies the connection ids
+        it is given, and acknowledges nothing. With no conn_ids the platform
+        ends every session it believes is open on the device.
+      operationId: disconnectDevice
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                conn_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int32
+      responses:
+        '200':
+          description: Disconnects queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queued:
+                    type: integer
+                  delivered_at_heartbeat:
+                    type: boolean
+        '403':
+          description: Not authorised for this device
+
+  /api/v1/devices/{id}/strategy:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      summary: Read the configuration pushed to this device
+      operationId: getDeviceStrategy
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The device's configuration and the version the client compares against
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  config_options:
+                    type: object
+                    additionalProperties:
+                      type: string
+                  modified_at:
+                    type: integer
+                    format: int64
+                  pushable_keys:
+                    type: array
+                    items:
+                      type: string
+    put:
+      summary: Push configuration to this device
+      description: >-
+        Administrator only. Only keys in pushable_keys are accepted: the server
+        identity keys (custom-rendezvous-server, api-server, relay-server, key)
+        are locked at the client build and pushing them here would reopen the
+        fleet-redirection path they are locked against. Applied at the device's
+        next heartbeat.
+      operationId: putDeviceStrategy
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                config_options:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        '200':
+          description: Configuration stored, pending delivery
+        '400':
+          description: A config option outside the pushable set
+        '403':
+          description: Administrator access required
+
+  /api/v1/devices/{id}/password:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    get:
+      summary: Read the device's platform-managed connection password
+      description: >-
+        The password the device checks when somebody connects to it. It is
+        generated by the platform, encrypted at rest, and released only to a
+        caller who passes CanAccessDevice for this device. Every release writes
+        a device.password_revealed audit event naming the caller.
+
+        applied says whether the device has confirmed the current version. False
+        means the machine is still accepting the previous password, because a
+        rotation only reaches a device on its next heartbeat.
+      operationId: getDevicePassword
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The current connection password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePassword'
+        '403':
+          description: Not authorised for this device
+        '404':
+          description: The device has not yet received a password
+
+  /api/v1/devices/{id}/password/rotate:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+    post:
+      summary: Rotate the device's connection password
+      description: >-
+        Administrator only. Generates a new password and delivers it at the
+        device's next heartbeat. Until the device confirms it, the previous
+        password still works there, which is why the response reports applied
+        as false.
+
+        Rotation also happens automatically when access is withdrawn: removing a
+        technician from a support group, or revoking a device group from one,
+        rotates the passwords of the devices that change hands.
+      operationId: rotateDevicePassword
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The new connection password
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DevicePassword'
+        '403':
+          description: Administrator access required
+        '404':
+          description: No such device
+
+  /api/v1/devices/{id}/connectivity:
+    parameters:
+      - $ref: '#/components/parameters/DeviceId'
+      - $ref: '#/components/parameters/Current'
+      - $ref: '#/components/parameters/PageSize'
+    get:
+      summary: This device's connectivity history
+      description: >-
+        One entry per change of connectivity, recorded by the worker at the
+        moment it changes the device. Transitions rather than samples: a fleet
+        that is behaving costs no rows, and an operator asks when a machine went
+        down and for how long, not what it was doing at 14:32.
+      operationId: getDeviceConnectivityHistory
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The device's connectivity events, most recent first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectivityEventPage'
+        '403':
+          description: Not authorised for this device
+
+  /api/v1/monitoring/events:
+    parameters:
+      - $ref: '#/components/parameters/Current'
+      - $ref: '#/components/parameters/PageSize'
+      - name: since
+        in: query
+        description: RFC 3339. Defaults to seven days ago, so a first page is bounded.
+        schema:
+          type: string
+          format: date-time
+      - name: connectivity
+        in: query
+        description: Filter to one state, such as OFFLINE.
+        schema:
+          type: string
+    get:
+      summary: Fleet-wide connectivity history
+      description: >-
+        Administrator, manager or Read Only. A technician's answer scoped to
+        their own support group would be a different and more misleading number
+        than the one this question is asking for.
+      operationId: getFleetConnectivityHistory
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Connectivity events across the fleet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectivityEventPage'
+        '400':
+          description: since is not an RFC 3339 timestamp
+        '403':
+          description: Administrator access required
+
+  /api/v1/notification-targets:
+    get:
+      summary: List webhook targets
+      description: >-
+        The secret is never returned, only whether one is set. A screen that
+        displays it is a screen that leaks it.
+      operationId: getNotificationTargets
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The configured targets and their delivery health
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/NotificationTarget'
+        '403':
+          description: Administrator access required
+    post:
+      summary: Add a webhook target
+      description: >-
+        Administrator only. The URL must be https: the payload names devices and
+        customers and is one of the few things this platform sends off its own
+        network.
+
+        Webhooks rather than email is a deliberate choice. Email needs an SMTP
+        server, credentials, a sender domain with SPF and DKIM and a bounce
+        story; a webhook needs a URL, and an operator who wants email points one
+        at something that already sends it.
+      operationId: createNotificationTarget
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                url:
+                  type: string
+                secret:
+                  description: Optional. Signs each body with HMAC-SHA256, sent as X-ODV-Signature.
+                  type: string
+                event_types:
+                  description: Empty means every event.
+                  type: array
+                  items:
+                    type: string
+                    enum: [device.offline, device.stale, device.online]
+                enabled:
+                  type: boolean
+              required:
+                - name
+                - url
+      responses:
+        '201':
+          description: Target created
+        '400':
+          description: A missing name, or a URL that is not https
+        '403':
+          description: Administrator access required
+        '409':
+          description: A target with that name already exists
+
+  /api/v1/notification-targets/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Remove a webhook target
+      operationId: deleteNotificationTarget
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Target removed
+        '403':
+          description: Administrator access required
+        '404':
+          description: No such target
+
+  /api/v1/notification-deliveries:
+    parameters:
+      - $ref: '#/components/parameters/Current'
+      - $ref: '#/components/parameters/PageSize'
+      - name: state
+        in: query
+        schema:
+          type: string
+          enum: [pending, delivered, abandoned]
+    get:
+      summary: The notification outbox
+      description: >-
+        Whether an alert actually went out. Abandoned deliveries are kept rather
+        than deleted, because "which notifications never arrived" is a question
+        somebody has after an incident, and a queue that discards its failures
+        cannot answer it.
+      operationId: getNotificationDeliveries
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Deliveries, most recent first
+        '403':
+          description: Administrator access required
+
+  /api/v1/device-observations:
+    parameters:
+      - $ref: '#/components/parameters/Current'
+      - $ref: '#/components/parameters/PageSize'
+    get:
+      summary: Device ids seen without a credential
+      description: >-
+        Heartbeats from ids that hold no valid enrollment credential. These are
+        recorded rather than registered, which is what replaced the previous
+        behaviour of adding any unknown id to the fleet. A device provisioned
+        but never enrolled appears here, and so does anything probing the
+        endpoint.
+      operationId: listDeviceObservations
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: A page of observations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            rustdesk_id:
+                              type: string
+                            device_uuid:
+                              type: string
+                              nullable: true
+                            client_ip:
+                              type: string
+                              nullable: true
+                            first_seen_at:
+                              type: string
+                              format: date-time
+                            last_seen_at:
+                              type: string
+                              format: date-time
+                            sightings:
+                              type: integer
+                              format: int64
+        '403':
+          description: Administrator access required
+
+  /api/enroll:
+    post:
+      summary: Redeem an enrollment token
+      description: >-
+        The one device endpoint that needs no credential, because it is where
+        the credential comes from. The device presents an enrollment token and
+        its RustDesk id, and receives a device_token it presents on every later
+        heartbeat. Redeeming again for a device that already exists replaces its
+        credential, which is how a reimaged device returns; crossing customers
+        is refused.
+      operationId: enrollDevice
+      tags:
+        - Device
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token:
+                  type: string
+                id:
+                  type: string
+                  description: The device's RustDesk id.
+                uuid:
+                  type: string
+                hostname:
+                  type: string
+                os:
+                  type: string
+                version:
+                  type: string
+              required:
+                - token
+                - id
+      responses:
+        '200':
+          description: Enrolled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  device_id:
+                    type: string
+                    format: uuid
+                  name:
+                    type: string
+                  device_token:
+                    type: string
+                    description: Returned once. The device stores it and presents it on every heartbeat.
+        '401':
+          description: Unknown, expired, exhausted or revoked token
+        '409':
+          description: This device id belongs to another customer
+
+  /api/v1/customers:
+    get:
+      summary: List customers
+      operationId: listCustomers
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of customers
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalCustomer'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      summary: Create a customer
+      operationId: createCustomer
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                name:
+                  type: string
+                external_id:
+                  type: string
+                description:
+                  type: string
+              required:
+                - code
+                - name
+      responses:
+        '201':
+          description: The created customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalCustomer'
+        '409':
+          description: A customer with that code already exists
+
+  /api/v1/customers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: Customer detail
+      operationId: getCustomer
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalCustomer'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      summary: Update a customer
+      operationId: updateCustomer
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                code:
+                  type: string
+                name:
+                  type: string
+                external_id:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '200':
+          description: The updated customer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalCustomer'
+    delete:
+      summary: Delete a customer
+      description: >
+        Devices reference customers with ON DELETE SET NULL, so their devices
+        are orphaned rather than deleted.
+      operationId: deleteCustomer
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/customers/{id}/locations:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: List a customer's locations
+      operationId: listLocations
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: A page of locations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalLocation'
+    post:
+      summary: Add a location to a customer
+      operationId: createLocation
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                external_id:
+                  type: string
+                address:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: The created location
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalLocation'
+
+  /api/v1/customers/{id}/locations/{locationId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - name: locationId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    patch:
+      summary: Update a location
+      operationId: updateLocation
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                external_id:
+                  type: string
+                address:
+                  type: string
+      responses:
+        '200':
+          description: The updated location
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalLocation'
+    delete:
+      summary: Delete a location
+      operationId: deleteLocation
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/device-groups:
+    get:
+      summary: List device groups
+      operationId: listDeviceGroups
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of device groups
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalDeviceGroup'
+    post:
+      summary: Create a device group
+      operationId: createDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                parent_id:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: The created device group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalDeviceGroup'
+
+  /api/v1/device-groups/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: Device group detail
+      operationId: getDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The device group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalDeviceGroup'
+    patch:
+      summary: Rename a device group or change its parent
+      operationId: updateDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                parent_id:
+                  type: string
+      responses:
+        '200':
+          description: The updated device group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalDeviceGroup'
+        '400':
+          description: A device group cannot be its own parent
+    delete:
+      summary: Delete a device group
+      operationId: deleteDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/device-groups/{id}/members:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: List the devices in a group
+      operationId: listDeviceGroupMembers
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: A page of devices
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalDevice'
+    post:
+      summary: Add a device to a group
+      operationId: addDeviceGroupMember
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_id:
+                  type: string
+                  format: uuid
+              required:
+                - device_id
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/device-groups/{id}/members/{deviceId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - name: deviceId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Remove a device from a group
+      operationId: removeDeviceGroupMember
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/support-groups:
+    get:
+      summary: List support groups
+      operationId: listSupportGroups
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of support groups
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalSupportGroup'
+    post:
+      summary: Create a support group
+      operationId: createSupportGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+              required:
+                - name
+      responses:
+        '201':
+          description: The created support group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSupportGroup'
+
+  /api/v1/support-groups/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    get:
+      summary: Support group detail, with its technicians and grants
+      operationId: getSupportGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The support group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSupportGroup'
+    patch:
+      summary: Update a support group
+      operationId: updateSupportGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+      responses:
+        '200':
+          description: The updated support group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSupportGroup'
+    delete:
+      summary: Delete a support group
+      operationId: deleteSupportGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/support-groups/{id}/technicians:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      summary: Add a technician to a support group
+      operationId: addTechnician
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id:
+                  type: integer
+                  format: int64
+              required:
+                - user_id
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/support-groups/{id}/technicians/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    delete:
+      summary: Remove a technician from a support group
+      operationId: removeTechnician
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/support-groups/{id}/device-groups:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    post:
+      summary: Grant a device group to a support group
+      description: >
+        This is the grant that makes devices appear in a technician's address
+        book.
+      operationId: grantDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                device_group_id:
+                  type: string
+                  format: uuid
+              required:
+                - device_group_id
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/support-groups/{id}/device-groups/{groupId}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+      - name: groupId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    delete:
+      summary: Revoke a device group from a support group
+      operationId: revokeDeviceGroup
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/users:
+    get:
+      summary: List portal users
+      operationId: listPortalUsers
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: active
+          in: query
+          schema:
+            type: boolean
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalUser'
+    post:
+      summary: Create a user account
+      description: >
+        Creates the account in Keycloak and the local row in one step, and
+        grants the role if one is named. The temporary password is returned
+        exactly once, in this response, and is stored nowhere: the account
+        carries the UPDATE_PASSWORD required action, so it is spent on first
+        sign-in. Hand it to the person out of band.
+
+
+        Answers 503 when the deployment has not configured Keycloak admin
+        access, because a local row whose account does not exist is a user who
+        can never sign in.
+      operationId: createPortalUser
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - email
+              properties:
+                email:
+                  type: string
+                  format: email
+                display_name:
+                  type: string
+                  description: Defaults to the email address.
+                role:
+                  type: string
+                  description: >
+                    One of the roles GET /api/v1/settings reports. Omitted means
+                    the account holds no role and is refused by every screen
+                    until one is granted.
+      responses:
+        '201':
+          description: The created user, with its one-time temporary password
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PortalUser'
+                  - type: object
+                    properties:
+                      temporary_password:
+                        type: string
+        '400':
+          description: Invalid email address or unknown role
+        '409':
+          description: That email already has an account
+        '502':
+          description: The identity provider refused to create the account
+        '503':
+          description: Keycloak admin access is not configured
+
+  /api/v1/users/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    get:
+      summary: User detail, with roles and support group memberships
+      operationId: getPortalUser
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalUser'
+    patch:
+      summary: Activate or deactivate a user
+      description: >
+        Deactivation takes effect on the next request, not the next sign-in:
+        the JWT middleware rejects a disabled user. An administrator cannot
+        deactivate their own account.
+      operationId: updatePortalUser
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                active:
+                  type: boolean
+                display_name:
+                  type: string
+      responses:
+        '200':
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalUser'
+        '400':
+          description: >
+            You cannot deactivate your own account, or the only active
+            administrator.
+    delete:
+      summary: Remove a user account
+      description: >
+        Removes the Keycloak account as well as the local row, and refuses if it
+        cannot: a local-only delete is not a removal, because the person signs in
+        again and is provisioned afresh as a Technician.
+
+
+        Removal rotates the connection password of every device the user could
+        reach, in force at each device's next heartbeat, because a password they
+        were shown goes on working until it is changed. The audit trail survives
+        them: audit_events has no foreign key to users.
+
+
+        A machine identity's Keycloak account belongs to the client it hangs off
+        rather than to this route, so for a service account only the local row
+        and its roles are removed.
+      operationId: deletePortalUser
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The user was removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  identity_account_removed:
+                    type: boolean
+                  passwords_rotated:
+                    type: integer
+                  rotation_in_force:
+                    type: string
+        '400':
+          description: >
+            You cannot remove your own account, or the only active
+            administrator.
+        '404':
+          description: No such user
+        '502':
+          description: The identity provider refused to remove the account
+        '503':
+          description: Keycloak admin access is not configured
+
+  /api/v1/users/{id}/roles:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      summary: Grant a role
+      operationId: grantRole
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+              required:
+                - role
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          description: Unknown role
+
+  /api/v1/users/{id}/roles/{role}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      - name: role
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      summary: Revoke a role
+      description: >
+        An administrator cannot revoke their own administrative role, because
+        it is not recoverable through the portal.
+      operationId: revokeRole
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+        '400':
+          description: You cannot revoke your own administrative role
+        '404':
+          description: The user does not have that role
+
+  /api/v1/enrollment-tokens:
+    get:
+      summary: List enrollment tokens
+      description: >
+        Served by the same handler as /api/enrollment-tokens, so both paths
+        share one definition of who may issue a token.
+      operationId: listEnrollmentTokensV1
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: customer
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: A page of enrollment tokens
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalEnrollmentToken'
+    post:
+      summary: Issue an enrollment token
+      description: The plaintext token is returned once, at creation, and never again.
+      operationId: createEnrollmentTokenV1
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                customer_id:
+                  type: string
+                  format: uuid
+                location_id:
+                  type: string
+                device_group_id:
+                  type: string
+                max_uses:
+                  type: integer
+                expires_at:
+                  type: string
+                  format: date-time
+              required:
+                - customer_id
+      responses:
+        '200':
+          description: The issued token, including its plaintext value
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalEnrollmentToken'
+
+  /api/v1/enrollment-tokens/{id}:
+    parameters:
+      - $ref: '#/components/parameters/ResourceId'
+    delete:
+      summary: Revoke an enrollment token
+      operationId: revokeEnrollmentTokenV1
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/Success'
+
+  /api/v1/audit/events:
+    get:
+      summary: Administrative changes
+      operationId: listAuditEvents
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: actor
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: resource
+          in: query
+          schema:
+            type: string
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: device
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of audit events
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalAuditEvent'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/audit/sessions:
+    get:
+      summary: Connection log
+      description: >
+        Scoped by access: a technician sees only sessions on devices they can
+        reach, so the connection log is not a way to enumerate the fleet.
+      operationId: listAuditSessions
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: device
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: user
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Current'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: A page of sessions
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/PageEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/PortalSession'
+
+  /api/v1/reports/{report}:
+    parameters:
+      - name: report
+        in: path
+        required: true
+        schema:
+          type: string
+          enum: [device-inventory, session-history, access-review]
+      - name: format
+        in: query
+        description: csv returns a downloadable file; anything else returns JSON.
+        schema:
+          type: string
+          enum: [json, csv]
+      - name: from
+        in: query
+        description: RFC 3339. session-history only; defaults to thirty days ago.
+        schema:
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        schema:
+          type: string
+          format: date-time
+    get:
+      summary: Run a report
+      description: >-
+        Three reports over data the platform already keeps: what machines are
+        managed and whether they are alive (device-inventory), who connected to
+        what and for how long (session-history), and who *could* connect to what
+        (access-review).
+
+        The last is the one an access review actually asks, and it is derived
+        from the same support-group chain the API enforces rather than from the
+        group tables read by hand, so a reviewer cannot sign off on a picture
+        that differs from what is enforced.
+
+        Administrator, manager or Read Only. A report scoped to one technician's
+        support groups is a filtered list rather than a report, and offering it
+        as one would let somebody sign off a review over a fraction of the
+        fleet. Running a report writes a report.generated audit event.
+      operationId: getReport
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The report, as JSON or as a CSV attachment
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  report:
+                    type: string
+                  generated_at:
+                    type: string
+                    format: date-time
+                  columns:
+                    type: array
+                    items:
+                      type: string
+                  total:
+                    type: integer
+                  data:
+                    type: array
+                    items:
+                      type: object
+            text/csv:
+              schema:
+                type: string
+        '403':
+          description: Administrator access required
+        '404':
+          description: No such report
+
+  /api/v1/settings:
+    get:
+      summary: Deployment settings
+      description: >
+        Read-only, and sourced from the process configuration rather than a
+        settings table. Making them editable needs a config table and a reload
+        path, which is out of scope for 1.0.
+      operationId: getSettings
+      tags:
+        - Portal
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: The settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PortalSettings'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1048,6 +3057,50 @@ components:
       scheme: bearer
 
   parameters:
+    Current:
+      name: current
+      in: query
+      description: 1-based page number.
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      description: Rows per page. Capped at 500 by the server.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 10
+    DeviceId:
+      name: id
+      in: path
+      required: true
+      description: The device's uuid.
+      schema:
+        type: string
+        format: uuid
+    ResourceId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    From:
+      name: from
+      in: query
+      description: Inclusive lower bound. RFC 3339, or a bare YYYY-MM-DD date.
+      schema:
+        type: string
+    To:
+      name: to
+      in: query
+      description: Inclusive upper bound. RFC 3339, or a bare YYYY-MM-DD date.
+      schema:
+        type: string
     AbGuid:
       name: guid
       in: path
@@ -1061,6 +3114,106 @@ components:
         format: uuid
 
   schemas:
+    ConnectivityEventPage:
+      type: object
+      properties:
+        total:
+          type: integer
+        current:
+          type: integer
+        pageSize:
+          type: integer
+        totalPages:
+          type: integer
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConnectivityEvent'
+    ConnectivityEvent:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        device_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        connectivity:
+          description: The state entered.
+          type: string
+        previous_duration_seconds:
+          description: How long the device had been unheard from when this was recorded.
+          type: integer
+          format: int64
+          nullable: true
+        occurred_at:
+          type: string
+          format: date-time
+    NotificationTarget:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        url:
+          type: string
+        has_secret:
+          description: Whether deliveries to this target are signed. The secret itself is never returned.
+          type: boolean
+        event_types:
+          type: array
+          items:
+            type: string
+        enabled:
+          type: boolean
+        last_success_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_failure_at:
+          type: string
+          format: date-time
+          nullable: true
+        last_failure_reason:
+          type: string
+          nullable: true
+        consecutive_failures:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+    DevicePassword:
+      type: object
+      description: >-
+        A device's platform-managed connection password. version is what the
+        device echoes on its heartbeat once it has applied the password, so
+        applied_version lagging version means the rotation has not reached the
+        machine yet and the previous password still works there.
+      properties:
+        password:
+          type: string
+        version:
+          type: integer
+          format: int64
+        applied_version:
+          type: integer
+          format: int64
+          nullable: true
+        applied:
+          type: boolean
+        applied_at:
+          type: string
+          format: date-time
+          nullable: true
+        rotated_at:
+          type: string
+          format: date-time
+        delivered_at_heartbeat:
+          type: boolean
     AbPeer:
       type: object
       description: An address book entry, as flutter/lib/models/peer_model.dart models it.
@@ -1384,3 +3537,444 @@ components:
         - name
         - state
         - connectivity
+
+    ApiV1Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+    PageEnvelope:
+      description: >
+        The list envelope. total is the count matching the filters, not the
+        length of data, so a client paging with `while current * pageSize <
+        total` terminates correctly.
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int64
+        current:
+          type: integer
+          format: int64
+        pageSize:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int64
+
+    PortalStats:
+      type: object
+      properties:
+        total_devices:
+          type: integer
+          format: int64
+        discovered_devices:
+          type: integer
+          format: int64
+        active_devices:
+          type: integer
+          format: int64
+        stale_devices:
+          type: integer
+          format: int64
+        offline_devices:
+          type: integer
+          format: int64
+        online_now:
+          type: integer
+          format: int64
+        total_customers:
+          type: integer
+          format: int64
+        total_technicians:
+          type: integer
+          format: int64
+        connections_24h:
+          type: integer
+          format: int64
+
+    PortalDevice:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        rustdesk_id:
+          type: string
+        name:
+          type: string
+        hostname:
+          type: string
+        os:
+          type: string
+        state:
+          type: string
+          enum: [DISCOVERED, ACTIVE, DISABLED, DECOMMISSIONED]
+        connectivity:
+          type: string
+          enum: [ONLINE, STALE, OFFLINE, UNKNOWN]
+        last_seen_at:
+          type: string
+          format: date-time
+        customer_id:
+          type: string
+          format: uuid
+        customer_name:
+          type: string
+        location_id:
+          type: string
+          format: uuid
+        location_name:
+          type: string
+        client_version:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PortalDeviceDetail:
+      allOf:
+        - $ref: '#/components/schemas/PortalDevice'
+        - type: object
+          properties:
+            serial_number:
+              type: string
+            groups:
+              type: array
+              items:
+                $ref: '#/components/schemas/PortalGroupSummary'
+            sysinfo:
+              $ref: '#/components/schemas/PortalSysinfo'
+
+    PortalSysinfo:
+      type: object
+      properties:
+        cpu:
+          type: string
+        memory:
+          type: string
+        disk:
+          type: string
+        network:
+          type: array
+          items:
+            type: string
+        software:
+          type: array
+          items:
+            type: string
+        collected_at:
+          type: string
+          format: date-time
+
+    PortalGroupSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+
+    PortalCustomer:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        name:
+          type: string
+        external_id:
+          type: string
+        description:
+          type: string
+        device_count:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PortalLocation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        external_id:
+          type: string
+        address:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PortalDeviceGroup:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        parent_id:
+          type: string
+          format: uuid
+        member_count:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PortalSupportGroup:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        technicians:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortalTechnician'
+        device_groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortalGroupSummary'
+        member_count:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PortalTechnician:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        email:
+          type: string
+        display_name:
+          type: string
+        active:
+          type: boolean
+
+    PortalUser:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        keycloak_subject:
+          type: string
+        email:
+          type: string
+        display_name:
+          type: string
+        active:
+          type: boolean
+        roles:
+          type: array
+          items:
+            type: string
+        support_groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/PortalGroupSummary'
+        last_login:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    PortalSession:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        user_id:
+          type: integer
+          format: int64
+        user_email:
+          type: string
+        start_time:
+          type: string
+          format: date-time
+        end_time:
+          type: string
+          format: date-time
+        duration_seconds:
+          type: integer
+        status:
+          type: string
+          enum: [REQUESTED, STARTED, ENDED, FAILED]
+        connected_from:
+          type: string
+        note:
+          description: The operator note attached by PUT /api/audit.
+          type: string
+
+    PortalAuditEvent:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          example: device.reassigned
+        user_id:
+          type: integer
+          format: int64
+        user_email:
+          type: string
+        device_id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        customer_id:
+          type: string
+          format: uuid
+        customer_name:
+          type: string
+        support_group_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+
+    PortalEnrollmentToken:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        prefix:
+          type: string
+        token:
+          description: The plaintext value. Present only in the creation response.
+          type: string
+        customer_id:
+          type: string
+          format: uuid
+        max_uses:
+          type: integer
+        uses:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time
+
+    PortalSettings:
+      type: object
+      properties:
+        address_book_max_peers:
+          type: integer
+        audit_retention_days:
+          type: integer
+        device_stale_after_seconds:
+          type: integer
+        device_offline_after_seconds:
+          type: integer
+        editable:
+          description: Always false in 1.0; settings come from the process environment.
+          type: boolean
+        roles:
+          description: >-
+            Every role this deployment has, read from the roles table so the
+            portal's grant control cannot offer one the grant endpoint would
+            reject. It offered "Manager" for exactly that reason; the role is
+            called "Support Manager".
+          type: array
+          items:
+            type: string
+        caller_roles:
+          description: >-
+            The signed-in user's own roles, so the portal can hide controls that
+            would 403. The API refuses regardless; this is a usability field and
+            not a security one.
+          type: array
+          items:
+            type: string
+
+  responses:
+    Success:
+      description: The operation succeeded
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+    Unauthorized:
+      description: No valid credential was presented
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiV1Error'
+    Forbidden:
+      description: >
+        The caller is authenticated but not authorised. Device endpoints return
+        403 rather than 404 for a device outside the caller's support groups, so
+        the response does not confirm that the id exists.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiV1Error'
+    NotFound:
+      description: No such record
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiV1Error'

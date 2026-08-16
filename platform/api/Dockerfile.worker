@@ -1,4 +1,5 @@
-FROM golang:1.23-alpine AS builder
+# Must satisfy the go directive in go.mod, which is 1.25.0.
+FROM golang:1.26-alpine AS builder
 
 WORKDIR /build
 
@@ -11,7 +12,9 @@ COPY . ./
 
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-w -s" -o worker ./cmd/worker/main.go
 
-FROM alpine:latest
+# Named because docker-compose.yml builds this with `target: worker`. Without
+# the name the build fails outright with "target stage worker could not be found".
+FROM alpine:latest AS worker
 
 RUN apk --no-cache add ca-certificates
 

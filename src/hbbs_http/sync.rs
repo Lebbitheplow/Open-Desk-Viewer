@@ -103,6 +103,13 @@ async fn start_hbbs_sync_async() {
                 if config::option2bool("stop-service", &Config::get_option("stop-service")) {
                     continue;
                 }
+                // OpenDeskViewer: without a device credential every request
+                // below is refused, so redeem the enrollment token first. This
+                // is a no-op once enrolled, and once the enrollment token has
+                // been spent or was never provisioned.
+                if Config::get_option(DEVICE_TOKEN_OPTION).is_empty() {
+                    enroll_device(&url).await;
+                }
                 let conns = Connection::alive_conns();
                 if info_uploaded.uploaded && (url != info_uploaded.url || id != info_uploaded.id) {
                     info_uploaded.uploaded = false;
@@ -132,6 +139,13 @@ async fn start_hbbs_sync_async() {
                     v["version"] = json!(crate::VERSION);
                     v["id"] = json!(id);
                     v["uuid"] = json!(crate::encode64(hbb_common::get_uuid()));
+                    // Also sent at enrollment. Repeated here so a device that
+                    // enrolled before it had a serial acquires one without
+                    // having to re-enroll, which it never does on its own.
+                    let serial = Config::get_option(SERIAL_OPTION);
+                    if !serial.is_empty() {
+                        v["serial"] = json!(serial);
+                    }
                     let ab_name = Config::get_option(keys::OPTION_PRESET_ADDRESS_BOOK_NAME);
                     if !ab_name.is_empty() {
                         v[keys::OPTION_PRESET_ADDRESS_BOOK_NAME] = json!(ab_name);
@@ -189,7 +203,7 @@ async fn start_hbbs_sync_async() {
                         let ver = config::Status::get("sysinfo_ver"); // sysinfo_ver is the version of sysinfo on server's side
                         if hash == old_hash {
                             // When the api doesn't exist, Ok("") will be returned in test.
-                            let samever = match crate::post_request(url.replace("heartbeat", "sysinfo_ver"), "".to_owned(), "").await {
+                            let samever = match crate::post_request(url.replace("heartbeat", "sysinfo_ver"), "".to_owned(), &device_auth_header()).await {
                                 Ok(x)  => {
                                     sysinfo_ver = x.clone();
                                     *PRO.lock().unwrap() = true;
@@ -207,7 +221,7 @@ async fn start_hbbs_sync_async() {
                             }
                         }
                     }
-                    match crate::post_request(url.replace("heartbeat", "sysinfo"), v, "").await {
+                    match crate::post_request(url.replace("heartbeat", "sysinfo"), v, &device_auth_header()).await {
                         Ok(x)  => {
                             if x == "SYSINFO_UPDATED" {
                                 info_uploaded = InfoUploaded::uploaded(url.clone(), id.clone(), sys_username);
@@ -241,7 +255,13 @@ async fn start_hbbs_sync_async() {
                 }
                 let modified_at = LocalConfig::get_option("strategy_timestamp").parse::<i64>().unwrap_or(0);
                 v["modified_at"] = json!(modified_at);
-                if let Ok(s) = crate::post_request(url.clone(), v.to_string(), "").await {
+                // OpenDeskViewer: the version of the platform-managed connection
+                // password this device has applied. The server sends a password
+                // only while this disagrees with its own, so echoing it is both
+                // the request for one and the acknowledgement of the last.
+                let password_version = applied_password_version();
+                v["password_version"] = json!(password_version);
+                if let Ok(s) = crate::post_request(url.clone(), v.to_string(), &device_auth_header()).await {
                     if let Ok(mut rsp) = serde_json::from_str::<HashMap::<&str, Value>>(&s) {
                         if rsp.remove("sysinfo").is_some() {
                             info_uploaded.uploaded = false;
@@ -266,11 +286,152 @@ async fn start_hbbs_sync_async() {
                                 handle_config_options(strategy.config_options);
                             }
                         }
+                        if let Some(password) = rsp.remove("device_password") {
+                            apply_device_password(password);
+                        }
                     }
                 }
             }
         }
     }
+}
+
+// OpenDeskViewer: device identity.
+//
+// Stock RustDesk reports to the API with no credential at all: the heartbeat
+// carries a rustdesk id, and the server is expected to believe it. That is why
+// this fork's server used to register any id that reported in, and why anyone
+// could forge liveness or squat an id before the real device arrived.
+//
+// A device now redeems an enrollment token once, at first contact, and keeps
+// the secret it gets back. Every later heartbeat and sysinfo carries that
+// secret in a header. The enrollment token is provisioned at build time or by
+// the installer, alongside the server address and key.
+const DEVICE_TOKEN_OPTION: &str = "device-token";
+const ENROLLMENT_TOKEN_OPTION: &str = "enrollment-token";
+
+// The identifier a technician searches on. Written during provisioning: on
+// Android from managed configuration, the hardware serial or ANDROID_ID, in
+// that order of preference (flutter/lib/main.dart); elsewhere it is whatever
+// the installer set, and empty is allowed.
+//
+// The client only reports it. What the platform does with it, including naming
+// the device after it, is the server's decision.
+const SERIAL_OPTION: &str = "odv-serial";
+
+// The header form post_request expects is "Name: Value" (src/common.rs:1475).
+// An empty string means no header, which is what an unenrolled device sends and
+// what the server answers 401 to.
+fn device_auth_header() -> String {
+    let token = Config::get_option(DEVICE_TOKEN_OPTION);
+    if token.is_empty() {
+        return "".to_owned();
+    }
+    format!("X-Device-Token: {}", token)
+}
+
+// Redeem the enrollment token, once, and keep the secret.
+//
+// Deliberately quiet about failure: a device that cannot enroll keeps
+// heartbeating and keeps being refused, which is visible on the server as an
+// observation. Retrying every heartbeat is correct, because the reason for
+// failure is usually that the server is not reachable yet.
+async fn enroll_device(heartbeat_url: &str) {
+    let enrollment_token = Config::get_option(ENROLLMENT_TOKEN_OPTION);
+    if enrollment_token.is_empty() {
+        return;
+    }
+
+    // hostname, os and serial are what the platform names the device from. Sent
+    // at enrollment rather than left to the first sysinfo upload, because the
+    // name is decided when the row is created and a device that arrives as its
+    // own nine-digit id is one a technician cannot find.
+    let sysinfo = crate::get_sysinfo();
+    let body = serde_json::json!({
+        "token": enrollment_token,
+        "id": Config::get_id(),
+        "uuid": crate::encode64(hbb_common::get_uuid()),
+        "version": crate::VERSION,
+        "hostname": sysinfo["hostname"].as_str().unwrap_or_default(),
+        "os": sysinfo["os"].as_str().unwrap_or_default(),
+        "serial": Config::get_option(SERIAL_OPTION),
+    });
+
+    let url = heartbeat_url.replace("heartbeat", "enroll");
+    match crate::post_request(url, body.to_string(), "").await {
+        Ok(response) => {
+            let token = serde_json::from_str::<Value>(&response)
+                .ok()
+                .and_then(|v| v["device_token"].as_str().map(|s| s.to_owned()))
+                .unwrap_or_default();
+            if token.is_empty() {
+                log::error!("enrollment response carried no device token");
+                return;
+            }
+            Config::set_option(DEVICE_TOKEN_OPTION.to_owned(), token);
+            // The enrollment token is spent. Clearing it means a stolen device
+            // image cannot be used to enroll a second machine, and that the
+            // token is not sitting in the config of every deployed device.
+            Config::set_option(ENROLLMENT_TOKEN_OPTION.to_owned(), "".to_owned());
+            log::info!("device enrolled");
+        }
+        Err(err) => {
+            log::error!("device enrollment failed: {}", err);
+        }
+    }
+}
+
+// OpenDeskViewer: the platform-managed connection password.
+//
+// Stock RustDesk generates its own permanent password and keeps it. That is
+// right for a personal installation and wrong for a managed fleet: nobody
+// central knows it, so nobody central can take it away, and "this technician no
+// longer has access" is a statement about a web page rather than about the
+// machine.
+//
+// The password now comes from the platform over the heartbeat. The device
+// records which version it has applied and echoes it on every heartbeat; the
+// server sends a password only while the two disagree, so this costs one field
+// per poll and writes to permanent password storage only when something has
+// actually changed.
+//
+// Note that this cannot go through the strategy channel, which writes the
+// options map. The permanent password is separate storage with its own hashing
+// and encryption (hbb_common's Config::set_permanent_password), and putting a
+// password into the options map would store something the device never checks.
+const PASSWORD_VERSION_OPTION: &str = "odv-password-version";
+
+#[cfg(not(any(target_os = "ios")))]
+fn applied_password_version() -> i64 {
+    LocalConfig::get_option(PASSWORD_VERSION_OPTION)
+        .parse::<i64>()
+        .unwrap_or(0)
+}
+
+#[cfg(not(any(target_os = "ios")))]
+fn apply_device_password(password: Value) {
+    let value = password["value"].as_str().unwrap_or_default();
+    let Some(version) = password["version"].as_i64() else {
+        log::error!("device password arrived without a version");
+        return;
+    };
+    if value.is_empty() {
+        log::error!("device password arrived empty; keeping the current one");
+        return;
+    }
+
+    // The version is recorded only after the write succeeds. set_permanent_password
+    // returns false when the deployment has disabled password changes or when
+    // the value cannot be prepared for storage, and recording the version anyway
+    // would tell the server the rotation had landed when the machine is still
+    // accepting the old password.
+    if !Config::set_permanent_password(value) {
+        log::error!("failed to apply the device password sent by the platform");
+        return;
+    }
+
+    LocalConfig::set_option(PASSWORD_VERSION_OPTION.to_string(), version.to_string());
+    log::info!("device password updated to version {}", version);
 }
 
 fn heartbeat_url() -> String {

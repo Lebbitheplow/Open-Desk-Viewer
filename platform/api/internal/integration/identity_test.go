@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/OpenDeskViewer/platform/api/internal/identity"
@@ -170,10 +171,12 @@ func TestGetSessionUserIgnoresExpiredSessions(t *testing.T) {
 	svc := identity.NewAuthService(f.db, "")
 	ctx := context.Background()
 
+	// Sessions store a SHA-256 of the token, never the token itself, so the
+	// fixture has to hash on the way in just as CreateSession does.
 	if _, err := f.db.Exec(ctx, `
-		INSERT INTO client_sessions (user_id, rustdesk_token, expires_at)
-		VALUES ($1, 'live-token', now() + interval '1 hour'),
-		       ($1, 'stale-token', now() - interval '1 hour')
+		INSERT INTO client_sessions (user_id, token_hash, expires_at)
+		VALUES ($1, encode(sha256('live-token'), 'hex'), now() + interval '1 hour'),
+		       ($1, encode(sha256('stale-token'), 'hex'), now() - interval '1 hour')
 	`, f.tech1ID); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -188,5 +191,116 @@ func TestGetSessionUserIgnoresExpiredSessions(t *testing.T) {
 
 	if _, err := svc.GetSessionUser(ctx, "stale-token"); err == nil {
 		t.Error("expected an expired session to be rejected")
+	}
+}
+
+// Every way of looking a user up has to return the same user. The four lookups
+// used to carry four copies of the query, and the copies had drifted: the
+// session path attached no support groups, so the same account was a different
+// object depending on which door it came through.
+func TestEveryUserLookupReturnsTheSameUser(t *testing.T) {
+	f := newFixture(t)
+	svc := identity.NewAuthService(f.db, "")
+	ctx := context.Background()
+
+	if _, err := f.db.Exec(ctx, `
+		INSERT INTO client_sessions (user_id, token_hash, expires_at)
+		VALUES ($1, encode(sha256('lookup-token'), 'hex'), now() + interval '1 hour')
+	`, f.tech1ID); err != nil {
+		t.Fatalf("failed to create a session: %v", err)
+	}
+
+	lookups := map[string]func() (*identity.User, error){
+		"by id":      func() (*identity.User, error) { return svc.GetUserByID(ctx, f.tech1ID) },
+		"by email":   func() (*identity.User, error) { return svc.GetUserByEmail(ctx, "tech1@example.com") },
+		"by subject": func() (*identity.User, error) { return svc.GetUserByKeycloakSubject(ctx, "sub-tech1") },
+		"by session": func() (*identity.User, error) { return svc.GetSessionUser(ctx, "lookup-token") },
+	}
+
+	for name, lookup := range lookups {
+		t.Run(name, func(t *testing.T) {
+			u, err := lookup()
+			if err != nil {
+				t.Fatalf("lookup failed: %v", err)
+			}
+			if u.ID != f.tech1ID {
+				t.Errorf("id = %d, want %d", u.ID, f.tech1ID)
+			}
+			if u.Email != "tech1@example.com" {
+				t.Errorf("email = %q", u.Email)
+			}
+			if len(u.Roles) != 1 || u.Roles[0].Name != "Technician" {
+				t.Errorf("roles = %+v, want exactly Technician", u.Roles)
+			}
+			if len(u.SupportGroups) != 1 || u.SupportGroups[0] != f.group1 {
+				t.Errorf("support groups = %v, want [%s]", u.SupportGroups, f.group1)
+			}
+		})
+	}
+
+	// A user in no group reads as an empty list rather than failing to scan,
+	// which is what the array_agg COALESCE is for.
+	lonely := f.newUser(t, "sub-lonely", "lonely@example.com", "Technician")
+	u, err := svc.GetUserByID(ctx, lonely)
+	if err != nil {
+		t.Fatalf("lookup of a user in no support group failed: %v", err)
+	}
+	if len(u.SupportGroups) != 0 {
+		t.Errorf("support groups = %v, want none", u.SupportGroups)
+	}
+}
+
+// An external system authenticates with a Keycloak client-credentials grant.
+// That token carries no email claim, which used to fail provisioning outright,
+// so no machine caller could authenticate at all and the ODV API could not be
+// driven from another system.
+func TestServiceAccountIsProvisionedWithoutAnEmail(t *testing.T) {
+	f := newFixture(t)
+	svc := identity.NewAuthService(f.db, "")
+	ctx := context.Background()
+
+	claims := &identity.JWTClaims{
+		Subject:           "sub-crm-integration",
+		PreferredUsername: identity.ServiceAccountPrefix + "odv-crm",
+	}
+	user, err := svc.ResolveUser(ctx, claims)
+	if err != nil {
+		t.Fatalf("a service account could not be provisioned: %v", err)
+	}
+
+	// Granted nothing. A machine account's reach is a decision an administrator
+	// makes, not a default, so its first call must be refused until they do.
+	if len(user.Roles) != 0 {
+		t.Errorf("roles = %v, want none; a service account must start inert", user.Roles)
+	}
+
+	// The synthetic address must not be able to collide with a real mailbox,
+	// or an invitation could be sent to a machine identity.
+	if !strings.HasSuffix(user.Email, ".invalid") {
+		t.Errorf("email = %q, want an address in a domain no mailbox can occupy", user.Email)
+	}
+
+	// Resolving again returns the same account rather than making a second one.
+	again, err := svc.ResolveUser(ctx, claims)
+	if err != nil {
+		t.Fatalf("second resolve failed: %v", err)
+	}
+	if again.ID != user.ID {
+		t.Errorf("second resolve created a new user (%d then %d)", user.ID, again.ID)
+	}
+}
+
+// A person's token still needs an email, because that is what identifies them
+// and what an administrator invites. Only the service-account shape is exempt.
+func TestATokenWithNoEmailAndNoServiceAccountIsStillRefused(t *testing.T) {
+	f := newFixture(t)
+	svc := identity.NewAuthService(f.db, "")
+
+	_, err := svc.ResolveUser(context.Background(), &identity.JWTClaims{
+		Subject:           "sub-anonymous",
+		PreferredUsername: "someone",
+	})
+	if err == nil {
+		t.Fatal("a token with no email and no service-account username was provisioned")
 	}
 }

@@ -23,14 +23,42 @@ func (s *AuthService) ResolveUser(ctx context.Context, claims *JWTClaims) (*User
 	return s.provisionUser(ctx, claims)
 }
 
+// ServiceAccountPrefix is how Keycloak names the user behind a client-credentials
+// grant. It is the only signal in the token that distinguishes a machine caller
+// from a person, and it is a Keycloak convention rather than a standard claim.
+const ServiceAccountPrefix = "service-account-"
+
+// serviceAccountDomain keeps machine identities out of the namespace a real
+// mailbox could occupy, so no invitation or password reset can ever address one.
+const serviceAccountDomain = "@service-account.invalid"
+
+// IsServiceAccountEmail reports whether an address belongs to a machine caller
+// rather than a person. The two callers are account creation, which must not
+// hand a person an address no mailbox can hold, and account removal, whose
+// Keycloak half belongs to the client the service account hangs off rather than
+// to this route.
+func IsServiceAccountEmail(email string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), serviceAccountDomain)
+}
+
 // provisionUser creates a user from token claims and grants it a default role.
 func (s *AuthService) provisionUser(ctx context.Context, claims *JWTClaims) (*User, error) {
 	email := strings.TrimSpace(claims.Email)
+	username := strings.TrimSpace(claims.PreferredUsername)
+
+	// A client-credentials token carries no email, which used to fail here and
+	// is why no external system could authenticate at all. It is provisioned as
+	// an ordinary user so that access control, the audit trail and the IDOR
+	// sweep all keep working on one kind of actor rather than two.
+	isServiceAccount := email == "" && strings.HasPrefix(username, ServiceAccountPrefix)
+	if isServiceAccount {
+		email = username + serviceAccountDomain
+	}
 	if email == "" {
 		return nil, fmt.Errorf("cannot provision subject %q: token carries no email claim", claims.Subject)
 	}
 
-	displayName := firstNonEmpty(claims.Name, claims.PreferredUsername, email)
+	displayName := firstNonEmpty(claims.Name, username, email)
 
 	// xmax = 0 is true only for a freshly inserted row, which distinguishes a
 	// first sign-in from a claim refresh on an existing account.
@@ -49,7 +77,12 @@ func (s *AuthService) provisionUser(ctx context.Context, claims *JWTClaims) (*Us
 		return nil, fmt.Errorf("failed to provision user %q: %w", email, err)
 	}
 
-	if created {
+	// A service account is granted nothing. A person signing in is a technician
+	// somebody hired; a machine account is a integration whose reach is a
+	// decision, so it starts inert and an administrator grants exactly what the
+	// integration needs. Its first call answers 403 until they do, which is the
+	// correct failure.
+	if created && !isServiceAccount {
 		role := RoleTechnician
 		if s.bootstrapAdminEmail != "" && strings.EqualFold(email, s.bootstrapAdminEmail) {
 			role = RoleAdministrator
@@ -121,7 +154,7 @@ func scanUserSummaries(rows pgx.Rows) ([]User, error) {
 // ListAllUsersPaginated returns users for administrators with pagination.
 func (s *AuthService) ListAllUsersPaginated(ctx context.Context, current, pageSize int64) ([]User, int64, error) {
 	offset := (current - 1) * pageSize
-	
+
 	rows, err := s.db.Query(ctx, `
 		SELECT id, keycloak_subject, email, display_name, active
 		FROM users
@@ -132,12 +165,12 @@ func (s *AuthService) ListAllUsersPaginated(ctx context.Context, current, pageSi
 		return nil, 0, err
 	}
 	defer rows.Close()
-	
+
 	users, err := scanUserSummaries(rows)
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	// Get total count
 	var total int64
 	err = s.db.QueryRow(ctx, `
@@ -146,14 +179,14 @@ func (s *AuthService) ListAllUsersPaginated(ctx context.Context, current, pageSi
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	return users, total, nil
 }
 
 // ListUsersSharingSupportGroupsPaginated returns users sharing support groups with pagination.
 func (s *AuthService) ListUsersSharingSupportGroupsPaginated(ctx context.Context, userID int64, current, pageSize int64) ([]User, int64, error) {
 	offset := (current - 1) * pageSize
-	
+
 	rows, err := s.db.Query(ctx, `
 		SELECT DISTINCT u.id, u.keycloak_subject, u.email, u.display_name, u.active
 		FROM users u
@@ -168,12 +201,12 @@ func (s *AuthService) ListUsersSharingSupportGroupsPaginated(ctx context.Context
 		return nil, 0, err
 	}
 	defer rows.Close()
-	
+
 	users, err := scanUserSummaries(rows)
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	// Get total count
 	var total int64
 	err = s.db.QueryRow(ctx, `
@@ -187,7 +220,7 @@ func (s *AuthService) ListUsersSharingSupportGroupsPaginated(ctx context.Context
 	if err != nil {
 		return nil, 0, err
 	}
-	
+
 	return users, total, nil
 }
 

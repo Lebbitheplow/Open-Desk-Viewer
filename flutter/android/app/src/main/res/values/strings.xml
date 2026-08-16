@@ -1,4 +1,16 @@
 <resources>
-    <string name="app_name">RustDesk</string>
-    <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when RustDesk screen sharing is established</string>
+    <!--
+      The customer-visible identity of a preinstalled device. Nothing in Kotlin
+      or Dart reads these; they are what the launcher, the app info screen and
+      the accessibility settings list show, which on a fleet nobody signed up
+      for is the only name the customer ever sees.
+
+      The protocol-level name is deliberately not changed here. config::APP_NAME
+      stays "RustDesk", because it is what derives the rustdesk:// URI scheme the
+      portal emits and the client registers, and the on-disk config paths. See
+      platform/android/README.md.
+    -->
+    <string name="app_name">OpenDeskViewer</string>
+    <string name="input_service_name">OpenDeskViewer Input</string>
+    <string name="accessibility_service_description">Allows a support technician to control this device while a support session is running</string>
 </resources>

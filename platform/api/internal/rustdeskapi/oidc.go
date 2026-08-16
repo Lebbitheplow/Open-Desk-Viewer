@@ -2,13 +2,13 @@ package rustdeskapi
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/OpenDeskViewer/platform/api/internal/auth"
 	"github.com/OpenDeskViewer/platform/api/internal/httpx"
 	"github.com/OpenDeskViewer/platform/api/internal/identity"
+	"github.com/rs/zerolog/log"
 )
 
 // OIDCBroker handles OIDC authentication flows with real JWT validation
@@ -25,45 +25,11 @@ func NewOIDCBroker(validator *auth.JWTValidator, authSvc *identity.AuthService) 
 	}
 }
 
-// HandleAuth handles the OIDC authorization endpoint
-func (b *OIDCBroker) HandleAuth(w http.ResponseWriter, r *http.Request) {
-	issuer := b.validator.Issuer()
-	http.Redirect(w, r, issuer+"/protocol/openid-connect/auth", http.StatusFound)
-}
-
-// HandleAuthQuery handles OIDC token exchange
-func (b *OIDCBroker) HandleAuthQuery(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		httpx.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	var req struct {
-		Code        string `json:"code"`
-		GrantType   string `json:"grant_type"`
-		RedirectURI string `json:"redirect_uri"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpx.WriteError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if req.Code == "" {
-		httpx.WriteError(w, http.StatusBadRequest, "missing authorization code")
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"access_token":  "placeholder_token",
-		"token_type":    "Bearer",
-		"expires_in":    300,
-		"refresh_token": "placeholder_refresh",
-		"id_token":      "",
-	})
-}
+// /api/oidc/auth and /api/oidc/auth-query used to live here, as a 302 and a 501
+// respectively. Both are now implemented in oidc_broker.go, which is where the
+// state they need lives. The 501 is what item 2.3 left behind after removing a
+// handler that answered 200 with {"access_token": "placeholder_token"} — a
+// value no caller could tell from a real token.
 
 // HandleJWKS serves the JWKS endpoint for client token validation
 func (b *OIDCBroker) HandleJWKS(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +83,13 @@ func (b *OIDCBroker) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	if token != "" {
 		claims, err := b.validator.ValidateToken(r.Context(), token)
 		if err != nil {
-			httpx.WriteError(w, http.StatusUnauthorized, fmt.Sprintf("invalid token: %v", err))
+			// The library's error names the claim that failed, the expected
+			// audience, the issuer and the clock skew. That is a description of
+			// how to build an acceptable token, handed to whoever presented an
+			// unacceptable one. Log it, return the generic form, exactly as
+			// httpx/jwt_middleware.go already does.
+			log.Warn().Err(err).Str("path", r.URL.Path).Msg("token validation failed")
+			httpx.WriteError(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
 
@@ -129,16 +101,15 @@ func (b *OIDCBroker) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if req.Username == "" || req.Password == "" {
-			httpx.WriteError(w, http.StatusBadRequest, "missing username or password")
-			return
-		}
-
-		user, err = b.authService.Authenticate(r.Context(), req.Username, req.Password)
-		if err != nil {
-			httpx.WriteError(w, http.StatusUnauthorized, "invalid credentials")
-			return
-		}
+		// Password sign-in is not offered by this deployment, and saying so is
+		// the point: it used to accept a username and a password, verify them
+		// against user_credentials, and refuse everybody, because nothing could
+		// ever write a credential there. Identity lives in Keycloak, so the
+		// client's route in is /api/oidc/auth, which /api/login-options now
+		// advertises. See the note in internal/identity/service.go.
+		httpx.WriteError(w, http.StatusBadRequest,
+			"password sign-in is not enabled; use the single sign-on option in the sign-in dialog")
+		return
 	}
 
 	if user == nil {

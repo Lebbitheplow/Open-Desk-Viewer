@@ -2,14 +2,14 @@ name: Linux Desktop Build
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'flutter/**'
       - 'libs/hbb_common/**'
       - 'src/**'
       - '.github/workflows/odv-linux.yml'
   pull_request:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'flutter/**'
       - 'libs/hbb_common/**'
@@ -20,6 +20,15 @@ on:
 env:
   FLUTTER_VERSION: '3.24.0'
   RUST_VERSION: '1.82.0'
+
+  # The deployment identity, baked into the binary at compile time. src/common.rs
+  # reads these with option_env!, so a build that misses them ships a client
+  # pointing at RustDesk's own servers and re-pointable by anyone who answers a
+  # heartbeat. Workflow level rather than step level: several steps compile Rust.
+  ODV_RENDEZVOUS_SERVER: ${{ vars.ODV_RENDEZVOUS_SERVER }}
+  ODV_RELAY_SERVER: ${{ vars.ODV_RELAY_SERVER }}
+  ODV_API_SERVER: ${{ vars.ODV_API_SERVER }}
+  ODV_RS_PUB_KEY: ${{ vars.ODV_RS_PUB_KEY }}
 
 jobs:
   build-linux:
@@ -33,13 +42,7 @@ jobs:
           submodules: recursive
 
       - name: Client configuration guard
-        run: |
-          bash .github/scripts/check-client-config.sh
-        env:
-          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
-          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
-          API_SERVER: ${{ vars.API_SERVER }}
-          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+        run: bash .github/scripts/check-client-config.sh
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

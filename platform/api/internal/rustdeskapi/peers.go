@@ -58,13 +58,26 @@ func (h *PeerHandler) getPeers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The field names here are a contract with the client, not a choice.
+	// PeerPayload.fromJson (flutter/lib/common/hbbs/hbbs.dart) reads `id` as the
+	// peer to connect to and builds the display name from info.device_name, so
+	// a response shaped any other way lists devices a technician cannot reach or
+	// identify. See TestPeersAnswerWhatTheClientConnectsTo.
 	var responsePeers []map[string]interface{}
 	for _, p := range peersList {
 		peer := map[string]interface{}{
-			"id":                p.ID.String(),
-			"name":              p.Name,
-			"info":              map[string]interface{}{"hostname": p.Hostname, "os": p.OS},
-			"status":            0,
+			"id":   p.RustdeskID,
+			"name": p.Name,
+			"info": map[string]interface{}{
+				// device_name rather than hostname: this is the field the client
+				// displays, and it is where the platform-assigned name (the
+				// serial, or a name set through the API) has to land for a
+				// technician to search on it.
+				"device_name": p.Name,
+				"hostname":    p.Hostname,
+				"os":          p.OS,
+			},
+			"status":            peerStatus(p.Connectivity),
 			"user":              p.UserName,
 			"user_name":         p.UserName,
 			"device_group_name": p.GroupName,
@@ -74,6 +87,22 @@ func (h *PeerHandler) getPeers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	httpx.WritePaginatedResponsePage(w, current, pageSize, total, responsePeers)
+}
+
+// peerStatus maps devices.connectivity onto the client's tri-state.
+//
+// 1 online, 0 offline, -1 unknown. STALE is reported offline rather than
+// unknown: a technician deciding whether to try a connection is better served
+// by "probably not" than by a state the client renders as nothing at all.
+func peerStatus(connectivity string) int {
+	switch connectivity {
+	case "ONLINE":
+		return 1
+	case "OFFLINE", "STALE":
+		return 0
+	default:
+		return -1
+	}
 }
 
 // HandleDeviceGroupAccessible handles /api/device-group/accessible

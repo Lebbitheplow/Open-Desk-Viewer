@@ -3,9 +3,11 @@ package integration
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/OpenDeskViewer/platform/api/internal/access"
 	"github.com/OpenDeskViewer/platform/api/internal/config"
+	"github.com/OpenDeskViewer/platform/api/internal/fleet"
 	"github.com/OpenDeskViewer/platform/api/internal/peers"
 	"github.com/google/uuid"
 )
@@ -243,5 +245,33 @@ func TestListDeviceGroups(t *testing.T) {
 	}
 	if total != 1 {
 		t.Fatalf("expected total=1, got %d", total)
+	}
+}
+
+// A freshly registered device has NULL last_seen_at, client_version, os and
+// hostname. Those are scanned into non-pointer Go fields, so before the select
+// list used COALESCE this errored, which meant /api/heartbeat registered a
+// device on its first call and then failed on that call and every later one.
+func TestGetDeviceByRustdeskIDReadsAFreshlyRegisteredDevice(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	svc := fleet.NewService(f.db, &config.Config{})
+
+	if _, err := svc.RegisterDevice(ctx, fleet.Device{
+		RustdeskID: "900000001",
+		UUID:       "uuid-900000001",
+		State:      "DISCOVERED",
+	}); err != nil {
+		t.Fatalf("failed to register: %v", err)
+	}
+
+	device, err := svc.GetDeviceByRustdeskID(ctx, "900000001")
+	if err != nil {
+		t.Fatalf("failed to read back a device that was just registered: %v", err)
+	}
+	// Compared as an instant, not by year: the epoch renders as 1969 in any
+	// timezone west of UTC.
+	if !device.LastSeenAt.Equal(time.Unix(0, 0)) {
+		t.Errorf("LastSeenAt = %v, want the epoch for a device never seen", device.LastSeenAt)
 	}
 }

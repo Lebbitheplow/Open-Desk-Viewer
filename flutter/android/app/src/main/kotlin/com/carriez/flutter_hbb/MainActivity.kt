@@ -267,6 +267,12 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                GET_MANAGED_CONFIG -> {
+                    result.success(managedConfig(context))
+                }
+                GET_DEVICE_SERIAL -> {
+                    result.success(deviceSerial(context))
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {

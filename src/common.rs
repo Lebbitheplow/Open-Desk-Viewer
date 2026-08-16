@@ -2132,7 +2132,64 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
 }
 
+// OpenDeskViewer: the deployment identity, locked at build time.
+//
+// Two problems are solved here, and they are the same problem seen from two
+// ends.
+//
+// First, configuration. Upstream's `RENDEZVOUS_SERVERS` and `RS_PUB_KEY` are
+// compile-time constants pointing at rs-ny.rustdesk.com and RustDesk's own
+// public key (libs/hbb_common/src/config.rs:120-121). A fork that does not
+// change them ships clients that talk to RustDesk's infrastructure, whatever
+// its CI claims. hbb_common cannot be patched -- .github/scripts/check-client-config.sh
+// fails the build if the submodule is dirty, deliberately, so that upstream
+// merges stay cheap -- so the deployment identity is injected here instead.
+//
+// Second, immutability. These four keys decide which server the client trusts.
+// Anything that can write them can re-point a managed device permanently: a
+// heartbeat response carrying `strategy.config_options`, a boot argument, or a
+// local edit of the config file. Putting them in OVERWRITE_SETTINGS closes all
+// of those at once, because Config::get_option reads OVERWRITE_SETTINGS ahead
+// of the saved options (config.rs:1245-1252) and Config::set_option refuses to
+// save any key it contains (config.rs:1260, via is_option_can_save). The value
+// is not merely preferred; the write is discarded.
+//
+// The stock mechanism for this is a custom client config, but read_custom_client
+// verifies it against a public key hardcoded to RustDesk's own
+// (`5Qbwsde3unUcJBtrx9ZkvUmwFNoExHzpryHuPUdqlWM=`, below), so only RustDesk can
+// sign one. That route is closed to a fork, which is why this is a direct
+// insertion rather than a generated config blob.
+//
+// Deliberately NOT locked: `enrollment-token`, which src/hbbs_http/sync.rs has
+// to clear once it is spent, and `device-token`, which it has to write.
+const ODV_LOCKED_SETTINGS: &[(&str, Option<&str>)] = &[
+    ("custom-rendezvous-server", option_env!("ODV_RENDEZVOUS_SERVER")),
+    ("relay-server", option_env!("ODV_RELAY_SERVER")),
+    ("api-server", option_env!("ODV_API_SERVER")),
+    ("key", option_env!("ODV_RS_PUB_KEY")),
+];
+
+/// Applies the build-time deployment identity, if this binary was built with one.
+///
+/// A build with none of the ODV_* variables set behaves exactly like upstream,
+/// so a developer build is unaffected and this cannot break the stock client.
+pub fn load_odv_locked_settings() {
+    let mut locked = config::OVERWRITE_SETTINGS.write().unwrap();
+    for (key, value) in ODV_LOCKED_SETTINGS {
+        let Some(value) = value.map(|v| v.trim()).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        locked.insert((*key).to_owned(), value.to_owned());
+    }
+}
+
 pub fn load_custom_client() {
+    // Applied here so that the paths which never reach read_custom_client (no
+    // custom.txt, unreadable file, failed signature) are still locked, and
+    // applied again at the end of read_custom_client so that a config carrying
+    // its own override-settings cannot win by being inserted later. Insertion
+    // is idempotent, so doing both costs nothing.
+    load_odv_locked_settings();
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
@@ -2301,6 +2358,10 @@ pub fn read_custom_client(config: &str) {
                 .insert(k, v.to_owned());
         };
     }
+    // Last word on the four server-identity keys. A custom client config is
+    // signed by RustDesk rather than by this deployment, so it is not a trusted
+    // source for where our devices connect.
+    load_odv_locked_settings();
 }
 
 #[inline]
@@ -3095,5 +3156,52 @@ mod tests {
         let combined_mask = MOUSE_TYPE_DOWN | ((MOUSE_BUTTON_LEFT | MOUSE_BUTTON_RIGHT) << 3);
         assert_eq!(combined_mask & MOUSE_TYPE_MASK, MOUSE_TYPE_DOWN);
         assert_eq!(combined_mask >> 3, MOUSE_BUTTON_LEFT | MOUSE_BUTTON_RIGHT);
+    }
+
+    // OpenDeskViewer: the build-time deployment lock.
+    //
+    // This test only means anything when the crate was compiled with the
+    // ODV_* variables set, because option_env! is resolved at compile time.
+    // Run it as:
+    //
+    //   ODV_API_SERVER=https://odv.example.com \
+    //   ODV_RENDEZVOUS_SERVER=odv.example.com \
+    //     cargo test --features linux-pkg-config odv_deployment_lock
+    //
+    // Without them it asserts the other half of the contract: that a build
+    // carrying no deployment identity behaves exactly like upstream and locks
+    // nothing. A silent skip would be worse than either.
+    #[test]
+    fn odv_deployment_lock_is_read_preferred_and_unwritable() {
+        load_odv_locked_settings();
+
+        let locked_api = option_env!("ODV_API_SERVER")
+            .map(|v| v.trim())
+            .filter(|v| !v.is_empty());
+
+        let Some(expected) = locked_api else {
+            assert!(
+                !config::OVERWRITE_SETTINGS
+                    .read()
+                    .unwrap()
+                    .contains_key("api-server"),
+                "a build with no ODV_API_SERVER must not lock api-server; \
+                 an unconfigured build has to behave exactly like upstream"
+            );
+            return;
+        };
+
+        // Read: the locked value is returned.
+        assert_eq!(config::Config::get_option("api-server"), expected);
+
+        // Write: refused, and the read still returns the locked value. This is
+        // the property that makes a pushed strategy, a boot argument and a
+        // hand-edited config file all unable to move the deployment.
+        config::Config::set_option("api-server".to_owned(), "https://attacker.example".to_owned());
+        assert_eq!(
+            config::Config::get_option("api-server"),
+            expected,
+            "set_option must not be able to overwrite a build-time locked key"
+        );
     }
 }

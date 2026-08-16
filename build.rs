@@ -91,4 +91,21 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    odv_rerun_on_deployment_env();
+}
+
+// OpenDeskViewer: the deployment identity is read at compile time with
+// option_env! in src/common.rs. Cargo does not know a source file depends on an
+// environment variable unless it is told, so without these lines a rebuild
+// after changing API_SERVER would silently reuse the previously baked-in value
+// and ship a client pointed at the wrong deployment.
+fn odv_rerun_on_deployment_env() {
+    for var in [
+        "ODV_RENDEZVOUS_SERVER",
+        "ODV_RELAY_SERVER",
+        "ODV_API_SERVER",
+        "ODV_RS_PUB_KEY",
+    ] {
+        println!("cargo:rerun-if-env-changed={}", var);
+    }
 }

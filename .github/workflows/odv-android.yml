@@ -2,16 +2,22 @@ name: Android Build
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'flutter/**'
       - 'libs/hbb_common/**'
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
       - '.github/workflows/odv-android.yml'
   pull_request:
-    branches: [main]
+    branches: [master, main]
     paths:
       - 'flutter/**'
       - 'libs/hbb_common/**'
+      - 'src/**'
+      - 'build.rs'
+      - 'Cargo.toml'
       - '.github/workflows/odv-android.yml'
   workflow_dispatch:
 
@@ -19,44 +25,84 @@ env:
   FLUTTER_VERSION: '3.24.0'
   JAVA_VERSION: '17'
   RUST_VERSION: '1.82.0'
+  NDK_VERSION: 'r28c'
+  CARGO_NDK_VERSION: '3.1.2'
+  CARGO_EXPAND_VERSION: '1.0.95'
+  # Must match the `flutter_rust_bridge = "=1.80"` pin in Cargo.toml. The
+  # generated Dart and the Rust it binds to are produced by the same tool, so a
+  # drift here is a compile error in generated code nobody wrote.
+  FLUTTER_RUST_BRIDGE_VERSION: '1.80.1'
+  VCPKG_COMMIT_ID: '120deac3062162151622ca4860575a33844ba10b'
+  VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+
+  # The deployment identity, baked into the binary at compile time.
+  #
+  # These four names are what src/common.rs reads with option_env!, and setting
+  # them at the workflow level rather than on one step is deliberate: the Rust
+  # is compiled by several steps, and a build that misses them produces a client
+  # that points at RustDesk's own servers and can be re-pointed by anyone who
+  # answers a heartbeat. That is what every APK this project built before item
+  # 1.3 actually did.
+  ODV_RENDEZVOUS_SERVER: ${{ vars.ODV_RENDEZVOUS_SERVER }}
+  ODV_RELAY_SERVER: ${{ vars.ODV_RELAY_SERVER }}
+  ODV_API_SERVER: ${{ vars.ODV_API_SERVER }}
+  ODV_RS_PUB_KEY: ${{ vars.ODV_RS_PUB_KEY }}
+
+  ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
 
 jobs:
   build-android:
-    name: Build Android APKs
+    name: Build ${{ matrix.job.abi }}
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        job:
+          - { target: aarch64-linux-android, abi: arm64-v8a, ndk: ndk_arm64.sh, platform: android-arm64, sysroot: aarch64-linux-android }
+          - { target: armv7-linux-androideabi, abi: armeabi-v7a, ndk: ndk_arm.sh, platform: android-arm, sysroot: arm-linux-androideabi }
+          - { target: x86_64-linux-android, abi: x86_64, ndk: ndk_x64.sh, platform: android-x64, sysroot: x86_64-linux-android }
 
     steps:
+      # vcpkg's ffmpeg build plus three Rust target directories does not fit in
+      # the default runner image's free space.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+        with:
+          tool-cache: false
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: false
+
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Client configuration guard
+        run: bash .github/scripts/check-client-config.sh
+
+      - name: Install build dependencies
         run: |
-          bash .github/scripts/check-client-config.sh
-        env:
-          RS_PUB_KEY: ${{ vars.RS_PUB_KEY }}
-          RENDEZVOUS_SERVERS: ${{ vars.RENDEZVOUS_SERVERS }}
-          API_SERVER: ${{ vars.API_SERVER }}
-          APP_NAME: ${{ vars.APP_NAME || 'OpenDeskViewer' }}
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang cmake curl git g++ libclang-dev libgtk-3-dev llvm-dev \
+            nasm ninja-build pkg-config unzip wget
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ env.RUST_VERSION }}
-          targets: arm64-v8a,armeabi-v7a,x86_64,x86
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: '11076708'
-          packages: 'platforms;android-34 build-tools;34.0.0 ndk;26.1.10909125'
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -65,78 +111,119 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Setup NDK
+        uses: nttld/setup-ndk@ed92fe6cadad69be94a966a7ee3271275e62f779 # v1
+        id: setup-ndk
+        with:
+          ndk-version: ${{ env.NDK_VERSION }}
+          add-to-path: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.job.target }}
+          # flutter_rust_bridge_codegen shells out to rustfmt.
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: odv-android
+          key: ${{ matrix.job.target }}
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      # libvpx, libyuv, opus, aom and oboe. build.rs links against these for an
+      # android target and fails without VCPKG_ROOT populated for the triplet.
+      - name: Build native dependencies
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: ./flutter/build_android_deps.sh ${{ matrix.job.abi }}
+
       - name: Install Flutter dependencies
-        run: |
-          cd flutter
-          flutter pub get
+        run: cd flutter && flutter pub get
 
-      - name: Build Rust FFI for Android
+      # generated_bridge.dart is gitignored, so it has to be produced here. This
+      # is the real generator: `dart run build_runner` builds nothing this
+      # project uses and used to run under `|| true`, so its failure was silent.
+      - name: Generate flutter_rust_bridge
         run: |
-          cd flutter
-          for abi in arm64-v8a armeabi-v7a x86_64 x86; do
-            echo "Building Rust FFI for $abi..."
-            cargo ndk -t $abi build --release -p hbb_common 2>&1 || true
-          done
+          cargo install cargo-expand --version ${{ env.CARGO_EXPAND_VERSION }} --locked
+          cargo install flutter_rust_bridge_codegen \
+            --version ${{ env.FLUTTER_RUST_BRIDGE_VERSION }} --features uuid --locked
+          flutter_rust_bridge_codegen \
+            --rust-input ./src/flutter_ffi.rs \
+            --dart-output ./flutter/lib/generated_bridge.dart
 
-      - name: Run flutter_rust_bridge codegen
-        run: |
-          cd flutter
-          dart run build_runner build --delete-conflicting-outputs 2>&1 || true
-
-      - name: Build APK (arm64-v8a)
-        run: |
-          cd flutter
-          flutter build apk --target-platform android-arm64 --release --split-debug-info=./debug-info-arm64
+      # The APK loads librustdesk.so. Building -p hbb_common produced an rlib and
+      # no shared object at all, and nothing copied anything into jniLibs, so the
+      # APKs this workflow used to upload had no Rust in them.
+      - name: Build librustdesk
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
-
-      - name: Build APK (armeabi-v7a)
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
+          ./flutter/${{ matrix.job.ndk }}
+          mkdir -p ./flutter/android/app/src/main/jniLibs/${{ matrix.job.abi }}
+          cp ./target/${{ matrix.job.target }}/release/liblibrustdesk.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.abi }}/librustdesk.so
+          cp ${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/${{ matrix.job.sysroot }}/libc++_shared.so \
+             ./flutter/android/app/src/main/jniLibs/${{ matrix.job.abi }}/
+
+      - name: Build APK
+        run: |
+          sed -i "s/org.gradle.jvmargs=-Xmx1024M/org.gradle.jvmargs=-Xmx2g/g" ./flutter/android/gradle.properties
           cd flutter
-          flutter build apk --target-platform android-arm --release --split-debug-info=./debug-info-arm
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          flutter build apk --release --target-platform ${{ matrix.job.platform }} \
+            --split-per-abi --split-debug-info=./debug-info
 
-      - name: Build APK (x86_64)
+      # The half of the guard that is worth having. Checking that the variables
+      # exist says nothing about whether the compiler saw them; this greps the
+      # shared object inside each APK for the api-server that was supposed to be
+      # baked in, and fails the build if it is not there.
+      - name: Verify the deployment lock reached the artifacts
         run: |
-          cd flutter
-          flutter build apk --target-platform android-x64 --release --split-debug-info=./debug-info-x64
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          bash .github/scripts/check-client-config.sh --verify \
+            flutter/build/app/outputs/flutter-apk
 
-      - name: Build AAB
+      # An MDM cannot update an app whose signature changed, and a firmware
+      # preinstall needs its key decided before the image is cut. Signing is
+      # therefore not optional for a shipping artifact, and the previous
+      # placeholder (--ks /dev/null ... || true) produced one that could be
+      # neither installed as an update nor trusted.
+      - name: Resolve build-tools version
+        if: env.ANDROID_SIGNING_KEY != ''
         run: |
-          cd flutter
-          flutter build appbundle --target-platform android-arm64,android-arm --release --split-debug-info=./debug-info
+          echo "ANDROID_SIGN_TOOL_VERSION=$(ls /usr/local/lib/android/sdk/build-tools/ | tail -n 1)" >> $GITHUB_ENV
+
+      - name: Sign APK
+        if: env.ANDROID_SIGNING_KEY != ''
+        id: sign
+        uses: r0adkll/sign-android-release@349ebdef58775b1e0d8099458af0816dc79b6407 # v1
+        with:
+          releaseDirectory: flutter/build/app/outputs/flutter-apk
+          signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
+          alias: ${{ secrets.ANDROID_ALIAS }}
+          keyStorePassword: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
+          BUILD_TOOLS_VERSION: ${{ env.ANDROID_SIGN_TOOL_VERSION }}
 
-      - name: Sign APKs (debug keys)
+      - name: Warn that the APK is unsigned
+        if: env.ANDROID_SIGNING_KEY == ''
         run: |
-          cd flutter/build/app/outputs/apk/release
-          for apk in app-*-release-*.apk; do
-            if [ -f "$apk" ] && [ "$apk" != "app-*-release-*.apk" ]; then
-              jarsigner -sigalg SHA256withRSA -digestalg SHA-256 \
-                -keystore /dev/null -storepass changeit -keypass changeit \
-                "$apk" androiddebugkey 2>/dev/null || true
-              apksigner sign --v1-signing-enabled true --v2-signing-enabled true \
-                --ks /dev/null --ks-pass pass:changeit --ks-key-alias androiddebugkey \
-                --key-pass pass:changeit "$apk" 2>/dev/null || true
-            fi
-          done
+          echo "::warning::ANDROID_SIGNING_KEY is not set. This APK is debug-signed and cannot be deployed by an MDM or preinstalled in firmware."
 
-      - name: Upload APKs
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: android-apks
-          path: |
-            flutter/build/app/outputs/apk/release/*.apk
-          retention-days: 7
-
-      - name: Upload AAB
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-aab
-          path: |
-            flutter/build/app/outputs/bundle/release/*.aab
+          name: odv-${{ matrix.job.abi }}-apk
+          path: flutter/build/app/outputs/flutter-apk/*.apk
           retention-days: 7

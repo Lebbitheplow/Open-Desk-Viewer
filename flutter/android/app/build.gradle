@@ -96,8 +96,18 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId "com.carriez.flutter_hbb"
+        // The installed package id. It is this deployment's, not upstream's:
+        // an MDM addresses an app by this, and a device that already carries
+        // com.carriez.flutter_hbb from a stock RustDesk install would otherwise
+        // refuse to install the fleet build beside it.
+        //
+        // The Kotlin package, and the `package` in AndroidManifest.xml, stay
+        // com.carriez.flutter_hbb on purpose: the Rust calls into MainService,
+        // InputService and FFI through JNI by fully qualified class name, so
+        // renaming the directory -- which platform/android/rebrand.sh used to do
+        // in place -- breaks every one of those lookups at runtime, in a build
+        // that compiles. applicationId is the id; the package is a namespace.
+        applicationId "com.opendeskviewer.client"
         minSdkVersion 22
         targetSdkVersion 33
         versionCode flutterVersionCode.toInteger()
@@ -115,8 +125,12 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // Local release builds sign from key.properties; CI signs the
+            // unsigned artifact afterwards from ANDROID_SIGNING_KEY, so a
+            // missing key.properties here is not a failure. Both target
+            // deployments need a stable identity either way: an MDM cannot push
+            // an update whose signature changed, and a firmware preinstall needs
+            // the key decided before the image is cut.
             signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }

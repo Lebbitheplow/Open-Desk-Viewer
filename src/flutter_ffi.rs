@@ -50,6 +50,11 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     } else {
         crate::read_custom_client(custom_client_config);
     }
+    // Both branches above already apply it, but this is the entry point every
+    // Flutter client passes through and the lock is what keeps a managed device
+    // pointed at its own deployment. Cheap and idempotent; worth not depending
+    // on the branch above staying correct.
+    crate::common::load_odv_locked_settings();
     #[cfg(target_os = "android")]
     {
         // flexi_logger can't work when android_logger initialized.
@@ -3093,6 +3098,11 @@ pub mod server_side {
                 crate::read_custom_client(&custom_client_config);
             }
         }
+        // The Android background service starts here, and when the JVM passes
+        // no custom client config nothing above touches the settings at all.
+        // Without this the service would run unlocked while the UI process was
+        // locked, which is the worst of both.
+        crate::common::load_odv_locked_settings();
         std::thread::spawn(move || start_server(true));
     }
 
