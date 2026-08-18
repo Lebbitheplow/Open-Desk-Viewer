@@ -419,7 +419,12 @@ class MainService : Service() {
         // watch them), and the boot receiver brings it back at the next restart.
         // A WorkManager keepalive was considered and rejected for the same
         // reason -- it could restart the process, not the consent it lost.
-        return if (isProjectMediaAllowed()) START_STICKY else START_NOT_STICKY
+        // Always sticky. Gating this on the op was wrong: a device whose
+        // service Android killed stayed dead until a reboot, so it fell out of
+        // the portal and could not be reached at all. Coming back and
+        // re-registering is strictly better, and where the op is granted the
+        // projection comes back with it.
+        return START_STICKY
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {

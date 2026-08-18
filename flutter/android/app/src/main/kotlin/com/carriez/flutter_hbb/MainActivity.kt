@@ -14,7 +14,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
@@ -101,6 +104,36 @@ class MainActivity : FlutterActivity() {
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
+        }
+    }
+
+    // Sends the operator to the two settings pages that decide whether this
+    // device stays reachable: battery optimisation, which otherwise kills the
+    // service, and overlay, which BootReceiver checks before starting on boot.
+    // Silent when already granted, so it is a one-time cost per device.
+    private fun requestUnattendedGrants() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+                if (!Settings.canDrawOverlays(this)) {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(logTag, "could not request the unattended grants: $e")
         }
     }
 
@@ -242,6 +275,14 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 START_SERVICE_HEADLESS -> {
+                    // Without these two the service is killed in doze and
+                    // BootReceiver refuses to start at all, so the device drops
+                    // off the fleet on the first screen lock and never returns.
+                    // Both are special-access grants: they cannot be requested
+                    // as runtime permissions, only by sending the operator to
+                    // the settings page once. An MDM policy grants them without
+                    // any of this.
+                    requestUnattendedGrants()
                     // EXT_INIT_FROM_BOOT so MainService takes the boot path:
                     // it registers, and it only reaches for a projection when
                     // the PROJECT_MEDIA op makes that silent. A customer never
