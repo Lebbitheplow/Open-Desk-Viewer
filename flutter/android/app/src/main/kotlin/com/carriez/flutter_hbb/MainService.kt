@@ -336,11 +336,18 @@ class MainService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
         super.onStartCommand(intent, flags, startId)
-        if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
+        // A sticky restart, after Android has killed the service for power on a
+        // screen lock or in doze, hands back a null intent. Treat it as a boot:
+        // come back up and, where the op allows, retake the projection with
+        // nobody present. Without this the restart did nothing at all, because
+        // the action did not match and every branch below was skipped.
+        val restarted = intent == null
+        if (restarted || intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
             createForegroundNotification()
 
-            val fromBoot = intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)
-            val allowConsentPrompt = intent.getBooleanExtra(EXT_ALLOW_CONSENT_PROMPT, false)
+            val fromBoot = restarted || intent?.getBooleanExtra(EXT_INIT_FROM_BOOT, false) == true
+            val allowConsentPrompt =
+                !restarted && intent?.getBooleanExtra(EXT_ALLOW_CONSENT_PROMPT, false) == true
             if (fromBoot) {
                 FFI.startService()
             }
@@ -388,7 +395,17 @@ class MainService : Service() {
                 }
             }
         }
-        // D.5, decided: keep upstream's START_NOT_STICKY.
+        // Upstream returns START_NOT_STICKY, and that was right while a restarted
+        // service could never regain a projection: it would come back alive but
+        // blind, which is worse than being plainly gone.
+        //
+        // With the PROJECT_MEDIA op granted that no longer holds. A restart can
+        // take a projection silently, so a device Android kills for power comes
+        // back able to capture instead of staying dark until somebody reboots
+        // it -- which is the entire point of an unattended fleet. Sticky exactly
+        // when it can recover, and not otherwise.
+        //
+        // Superseded reasoning, kept because it is still true without the op:
         //
         // A restarted service is handed no projection token, so a sticky restart
         // produces exactly the state above: a running service that cannot
@@ -400,7 +417,7 @@ class MainService : Service() {
         // watch them), and the boot receiver brings it back at the next restart.
         // A WorkManager keepalive was considered and rejected for the same
         // reason -- it could restart the process, not the consent it lost.
-        return START_NOT_STICKY
+        return if (isProjectMediaAllowed()) START_STICKY else START_NOT_STICKY
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
