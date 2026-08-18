@@ -126,12 +126,21 @@ android {
     buildTypes {
         release {
             // Local release builds sign from key.properties; CI signs the
-            // unsigned artifact afterwards from ANDROID_SIGNING_KEY, so a
-            // missing key.properties here is not a failure. Both target
-            // deployments need a stable identity either way: an MDM cannot push
-            // an update whose signature changed, and a firmware preinstall needs
-            // the key decided before the image is cut.
-            signingConfig signingConfigs.release
+            // artifact afterwards from ANDROID_SIGNING_KEY. Selecting the
+            // release config unconditionally made a missing key.properties a
+            // hard failure -- AGP rejects it at :app:packageRelease with
+            // 'SigningConfig "release" is missing required property
+            // "storeFile"' -- rather than the fallback the comment claimed, so
+            // no CI build without a keystore could ever package.
+            //
+            // Falling back to the debug key keeps those builds producing an
+            // installable artifact. It is deliberately not good enough to ship:
+            // both target deployments need a stable identity, because an MDM
+            // cannot push an update whose signature changed and a firmware
+            // preinstall needs the key decided before the image is cut.
+            signingConfig keystorePropertiesFile.exists()
+                ? signingConfigs.release
+                : signingConfigs.debug
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
     }
