@@ -96,7 +96,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             clang cmake curl git g++ libclang-dev libgtk-3-dev llvm-dev \
-            nasm ninja-build pkg-config unzip wget
+            nasm ninja-build pkg-config unzip wget \
+            gcc-multilib g++-multilib libc6-dev
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -168,6 +169,13 @@ jobs:
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          # Every bindgen in this build -- libs/scrap over vpx_ffi.h, and
+          # hwcodec over ffmpeg -- was resolving headers against the host
+          # /usr/include, finding the generic ones and then failing on the
+          # multiarch bits/: "'bits/wordsize.h' file not found". cargo-ndk
+          # exports the sysroot as BINDGEN_EXTRA_CLANG_ARGS_<triple>, which the
+          # bindgen versions pinned here do not read, so name it unsuffixed.
+          BINDGEN_EXTRA_CLANG_ARGS: --sysroot=${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
         run: |
           cargo install cargo-ndk --version ${{ env.CARGO_NDK_VERSION }} --locked
           ./flutter/${{ matrix.job.ndk }}
