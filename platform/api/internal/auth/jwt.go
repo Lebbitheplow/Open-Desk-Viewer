@@ -231,7 +231,7 @@ func publicKeyFromJWK(key JWK) (interface{}, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse x5c certificate: %w", err)
 		}
-		return cert, nil
+		return rsaPublicKeyFromCert(cert)
 	}
 
 	pubKey, err := decodeJWKToPublicKey(key)

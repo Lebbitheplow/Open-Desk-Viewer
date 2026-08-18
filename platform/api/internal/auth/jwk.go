@@ -22,6 +22,20 @@ func parseX509Cert(b64Cert string) (*x509.Certificate, error) {
 	return cert, nil
 }
 
+// rsaPublicKeyFromCert returns the public key an x5c certificate carries.
+//
+// The certificate is not itself a verification key: golang-jwt's RSA method
+// type-asserts *rsa.PublicKey and rejects anything else, so handing it the
+// certificate fails every signature check. Keycloak publishes x5c on every
+// signing key, which made that path the only one taken in practice.
+func rsaPublicKeyFromCert(cert *x509.Certificate) (*rsa.PublicKey, error) {
+	pub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("x5c certificate carries a %T, not an RSA public key", cert.PublicKey)
+	}
+	return pub, nil
+}
+
 // decodeJWKToPublicKey decodes a JWK with n/e fields into an RSA public key
 func decodeJWKToPublicKey(jwk JWK) (*rsa.PublicKey, error) {
 	nBytes, err := base64.RawURLEncoding.DecodeString(jwk.N)

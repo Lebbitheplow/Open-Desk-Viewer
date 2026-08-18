@@ -112,9 +112,18 @@ func (h *Handlers) HandleCurrentUser(w http.ResponseWriter, r *http.Request) {
 // acknowledgement, which is what lets the portal say whether a rotation has
 // actually reached the machine.
 type heartbeatRequest struct {
-	ID              string `json:"id"`
-	UUID            string `json:"uuid"`
-	Ver             string `json:"ver"`
+	ID   string `json:"id"`
+	UUID string `json:"uuid"`
+	// Ver is the client's numeric version: hbb_common::get_version_number
+	// returns an i64, so 1.4.4 arrives as 1004004. It is recorded nowhere and
+	// is kept only so the shape of the request is visible here.
+	//
+	// It must not be typed as a string. encoding/json fails the whole decode on
+	// the mismatch, so every heartbeat in the fleet was answered with 400
+	// "invalid JSON body" and every device stayed enrolled but never live: no
+	// liveness, no connectivity, and no managed password, because that is
+	// issued on the first heartbeat that succeeds.
+	Ver             int64 `json:"ver"`
 	Conns           []int  `json:"conns"`
 	ModifiedAt      int64  `json:"modified_at"`
 	Token           string `json:"device_token"`
