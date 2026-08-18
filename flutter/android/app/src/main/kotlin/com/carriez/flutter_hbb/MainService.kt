@@ -355,7 +355,9 @@ class MainService : Service() {
             val mediaProjectionManager =
                 getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-            intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
+            // Nullable now: a sticky restart arrives with no intent at all, so
+            // there is no projection token on it and the branch below applies.
+            intent?.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
                 mediaProjection =
                     mediaProjectionManager.getMediaProjection(Activity.RESULT_OK, it)
                 checkMediaPermission()
