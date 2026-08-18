@@ -99,6 +99,12 @@ jobs:
         run: bash .github/scripts/check-client-config.sh
 
       - name: Install build dependencies
+        # Without DEBIAN_FRONTEND a debconf prompt has nothing to read from and
+        # the step sits there until the job is cancelled, which is what happened
+        # to run 32157857199: all three ABIs stalled here for over two hours.
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        timeout-minutes: 15
         run: |
           sudo apt-get update
           sudo apt-get install -y \
