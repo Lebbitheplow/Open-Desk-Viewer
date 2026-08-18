@@ -248,7 +248,12 @@ class MainActivity : FlutterActivity() {
                     // sees a dialog either way.
                     val it = Intent(this, MainService::class.java).apply {
                         action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
+                        // FROM_BOOT starts the Rust side; ALLOW_CONSENT_PROMPT
+                        // says a person is here, so capture can be acquired on
+                        // this launch even before the device is provisioned
+                        // with the PROJECT_MEDIA op.
                         putExtra(EXT_INIT_FROM_BOOT, true)
+                        putExtra(EXT_ALLOW_CONSENT_PROMPT, true)
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         startForegroundService(it)

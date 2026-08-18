@@ -340,6 +340,7 @@ class MainService : Service() {
             createForegroundNotification()
 
             val fromBoot = intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)
+            val allowConsentPrompt = intent.getBooleanExtra(EXT_ALLOW_CONSENT_PROMPT, false)
             if (fromBoot) {
                 FFI.startService()
             }
@@ -353,13 +354,17 @@ class MainService : Service() {
                 checkMediaPermission()
                 _isReady = true
             } ?: let {
-                if (fromBoot && isProjectMediaAllowed()) {
+                if (fromBoot && (isProjectMediaAllowed() || allowConsentPrompt)) {
                     // The PROJECT_MEDIA app op is granted, so the consent
                     // activity returns RESULT_OK without drawing anything.
                     // Requesting here is what makes capture survive a reboot on
                     // a provisioned device: the op lives in appops.xml, the
                     // token does not survive at all.
-                    Log.i(logTag, "started from boot with PROJECT_MEDIA allowed: taking a projection without a dialog")
+                    // With the op granted the consent activity returns
+                    // immediately and nothing is drawn. Without it, and only
+                    // when a person launched the app, the dialog is shown once;
+                    // the alternative is a client that can never capture at all.
+                    Log.i(logTag, "requesting a projection (op allowed=${isProjectMediaAllowed()}, user present=$allowConsentPrompt)")
                     requestMediaProjection()
                 } else if (fromBoot) {
                     // A boot start carries no projection token, and asking for

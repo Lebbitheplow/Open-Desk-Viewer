@@ -37,6 +37,10 @@ const val ACT_REQUEST_MEDIA_PROJECTION = "REQUEST_MEDIA_PROJECTION"
 const val ACT_INIT_MEDIA_PROJECTION_AND_SERVICE = "INIT_MEDIA_PROJECTION_AND_SERVICE"
 const val ACT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
 const val EXT_INIT_FROM_BOOT = "EXT_INIT_FROM_BOOT"
+// Set when a person launched the app, so MainService may raise the system
+// consent dialog if the PROJECT_MEDIA op has not been granted. A boot start
+// never sets it: nobody is there to answer.
+const val EXT_ALLOW_CONSENT_PROMPT = "EXT_ALLOW_CONSENT_PROMPT"
 const val EXT_MEDIA_PROJECTION_RES_INTENT = "MEDIA_PROJECTION_RES_INTENT"
 const val EXT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
 
