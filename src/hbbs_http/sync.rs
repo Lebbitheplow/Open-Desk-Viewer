@@ -310,6 +310,36 @@ async fn start_hbbs_sync_async() {
 const DEVICE_TOKEN_OPTION: &str = "device-token";
 const ENROLLMENT_TOKEN_OPTION: &str = "enrollment-token";
 
+// The enrollment token baked in at build time, which is what lets an image the
+// MDM merely installs enrol itself with nothing to configure at the far end.
+//
+// It is deliberately not one of ODV_LOCKED_SETTINGS in src/common.rs: a locked
+// setting cannot be written, and this one has to be cleared the moment it is
+// spent. It is a fallback for the stored option rather than an override, so a
+// token delivered by managed configuration or by --enrollment-token= still
+// wins over the compiled-in one.
+const ODV_BUILTIN_ENROLLMENT_TOKEN: Option<&str> = option_env!("ODV_ENROLLMENT_TOKEN");
+
+// The token to present, preferring one that was provisioned at run time.
+//
+// Only ever consulted while device-token is empty, because that is the caller's
+// guard, so a device that has already enrolled never falls back to the built-in
+// token and a spent token is not resurrected on the next heartbeat. A wiped or
+// reimaged device does enrol again, which is the intent: the image carries its
+// own credential, and how many devices may use it is the max_uses the token was
+// issued with.
+fn enrollment_token() -> String {
+    let stored = Config::get_option(ENROLLMENT_TOKEN_OPTION);
+    if !stored.is_empty() {
+        return stored;
+    }
+    ODV_BUILTIN_ENROLLMENT_TOKEN
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 // The identifier a technician searches on. Written during provisioning: on
 // Android from managed configuration, the hardware serial or ANDROID_ID, in
 // that order of preference (flutter/lib/main.dart); elsewhere it is whatever
@@ -337,7 +367,7 @@ fn device_auth_header() -> String {
 // observation. Retrying every heartbeat is correct, because the reason for
 // failure is usually that the server is not reachable yet.
 async fn enroll_device(heartbeat_url: &str) {
-    let enrollment_token = Config::get_option(ENROLLMENT_TOKEN_OPTION);
+    let enrollment_token = enrollment_token();
     if enrollment_token.is_empty() {
         return;
     }

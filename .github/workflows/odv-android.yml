@@ -48,6 +48,13 @@ env:
   ODV_API_SERVER: ${{ vars.ODV_API_SERVER }}
   ODV_RS_PUB_KEY: ${{ vars.ODV_RS_PUB_KEY }}
 
+  # The enrollment token, compiled in so that an image the MDM merely installs
+  # enrols itself on first contact with nothing to configure on the device. A
+  # secret rather than a variable: it is a fleet-joining credential until its
+  # uses run out. Optional -- a build without it produces a client that expects
+  # the token from managed configuration or --enrollment-token= instead.
+  ODV_ENROLLMENT_TOKEN: ${{ secrets.ODV_ENROLLMENT_TOKEN }}
+
   ANDROID_SIGNING_KEY: ${{ secrets.ANDROID_SIGNING_KEY }}
 
 jobs:

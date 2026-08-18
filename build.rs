@@ -105,6 +105,7 @@ fn odv_rerun_on_deployment_env() {
         "ODV_RELAY_SERVER",
         "ODV_API_SERVER",
         "ODV_RS_PUB_KEY",
+        "ODV_ENROLLMENT_TOKEN",
     ] {
         println!("cargo:rerun-if-env-changed={}", var);
     }
