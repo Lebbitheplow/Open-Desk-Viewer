@@ -132,8 +132,33 @@ class MainActivity : FlutterActivity() {
                     )
                 }
             }
+            // Remote input and clipboard both run through InputService, and an
+            // app may not enable its own accessibility service -- only the
+            // operator or an MDM policy can. Without it a session shows the
+            // screen and ignores every tap, which looks like a broken session
+            // rather than a missing grant, so send them to the page.
+            if (!isInputServiceEnabled()) {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
         } catch (e: Exception) {
             Log.w(logTag, "could not request the unattended grants: $e")
+        }
+    }
+
+    // Whether our accessibility service is in the enabled list. Read from
+    // Settings.Secure rather than AccessibilityManager: the latter reports
+    // services that are enabled and running, and we want to know whether the
+    // grant exists at all before the service has had a chance to start.
+    private fun isInputServiceEnabled(): Boolean {
+        return try {
+            val enabled = Settings.Secure.getString(
+                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+            ) ?: return false
+            enabled.contains("$packageName/", ignoreCase = true) &&
+                enabled.contains("InputService", ignoreCase = true)
+        } catch (e: Exception) {
+            Log.w(logTag, "could not read the accessibility service list: $e")
+            false
         }
     }
 

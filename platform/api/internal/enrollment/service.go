@@ -314,6 +314,21 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult,
 		SELECT id, customer_id, name FROM devices WHERE rustdesk_id = $1 FOR UPDATE
 	`, req.RustdeskID).Scan(&deviceID, &existingCustomer, &name)
 
+	// A wiped, reimaged or reinstalled device comes back with a new RustDesk id
+	// -- it is generated fresh with the config -- but the same serial. The
+	// lookup above therefore misses, and the insert below used to collide with
+	// idx_devices_serial_customer and fail the whole enrollment with a 500, so
+	// the device could never rejoin: it heartbeat without a credential and was
+	// recorded as an observation forever. Match the serial within the customer
+	// as well, and treat that as the re-enrollment it is.
+	if errors.Is(err, pgx.ErrNoRows) && req.Serial != "" {
+		err = tx.QueryRow(ctx, `
+			SELECT id, customer_id, name FROM devices
+			WHERE serial_number = $1 AND customer_id = $2
+			FOR UPDATE
+		`, req.Serial, token.CustomerID).Scan(&deviceID, &existingCustomer, &name)
+	}
+
 	reenrolled := err == nil
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -344,6 +359,10 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult,
 		if _, err := tx.Exec(ctx, `
 			UPDATE devices
 			SET uuid = $2,
+			    -- Carried across because a reinstalled device generates a new
+			    -- one, and the row must follow it or the portal would offer a
+			    -- Connect that resolves to nothing.
+			    rustdesk_id = $9,
 			    customer_id = $3,
 			    location_id = COALESCE($4, location_id),
 			    state = CASE WHEN state IN ('DISABLED', 'DECOMMISSIONED') THEN state ELSE 'ACTIVE' END,
@@ -355,7 +374,7 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult,
 			WHERE id = $1
 		`, deviceID, req.UUID, token.CustomerID, token.LocationID,
 			nullable(req.OS), nullable(req.Hostname), nullable(req.Version),
-			nullable(req.Serial)); err != nil {
+			nullable(req.Serial), req.RustdeskID); err != nil {
 			return nil, fmt.Errorf("failed to update device: %w", err)
 		}
 	}
