@@ -13,4 +13,17 @@
     <string name="app_name">OpenDeskViewer</string>
     <string name="input_service_name">OpenDeskViewer Input</string>
     <string name="accessibility_service_description">Allows a support technician to control this device while a support session is running</string>
+
+    <!--
+      Descriptions for the managed configuration in res/xml/app_restrictions.xml.
+      AAPT types <restriction android:description> as a reference, so these
+      cannot be written inline there: doing so fails resource linking with
+      "is incompatible with attribute description (attr) reference".
+    -->
+    <string name="restriction_enrollment_token_description">Token issued by the management portal. Redeemed once at first contact and then cleared, so a cloned image cannot enrol twice.</string>
+    <string name="restriction_serial_number_description">The identifier technicians search this device by. Preferred over the hardware serial, which an ordinary app cannot read on Android 10 and later. Left empty, the client falls back to the hardware serial if it is readable, then to ANDROID_ID.</string>
+    <string name="restriction_api_server_description">Management API base URL, for example https://odv.example.com. Ignored on a build that already has its deployment baked in.</string>
+    <string name="restriction_rendezvous_server_description">Rendezvous server host. Ignored on a build that already has its deployment baked in.</string>
+    <string name="restriction_relay_server_description">Relay server host. Ignored on a build that already has its deployment baked in.</string>
+    <string name="restriction_key_description">Deployment public key. Ignored on a build that already has its deployment baked in.</string>
 </resources>
