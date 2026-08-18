@@ -196,6 +196,7 @@ Future<void> applyPreConfig() async {
   await _recordSerial();
   await _applyEnrollmentToken(requested.remove(_kEnrollmentTokenOption));
   await _enableStartOnBoot();
+  await _startServiceUnattended();
 
   if (requested.isEmpty) return;
 
@@ -318,6 +319,30 @@ const _kStartOnBootProvisionedOption = 'odv-start-on-boot-provisioned';
 ///
 /// Done once rather than on every launch: this is provisioning, not policy, and
 /// re-asserting it would silently undo an operator who turned it off.
+/// Starts the background service on a client that knows its deployment.
+///
+/// Without this the service only ever starts from BootReceiver or from somebody
+/// tapping "share screen", so a freshly installed device sat there having never
+/// contacted the server: no heartbeat, no enrolment, nothing in the portal. A
+/// fleet nobody is supposed to touch cannot depend on that tap.
+///
+/// The service is started on the same headless path a boot uses, so it does not
+/// raise a consent dialog; screen capture comes from the PROJECT_MEDIA app op
+/// granted at provisioning, not from asking whoever is holding the device.
+Future<void> _startServiceUnattended() async {
+  if (!isAndroid) return;
+  final rendezvous =
+      (await bind.mainGetOption(key: 'custom-rendezvous-server')).trim();
+  final apiServer = (await bind.mainGetOption(key: 'api-server')).trim();
+  if (rendezvous.isEmpty && apiServer.isEmpty) return;
+
+  try {
+    await platformFFI.invokeMethod(AndroidChannel.kStartServiceHeadless);
+  } catch (err) {
+    debugPrint('applyPreConfig: could not start the service: $err');
+  }
+}
+
 Future<void> _enableStartOnBoot() async {
   if (!isAndroid) return;
   final already =

@@ -454,6 +454,7 @@ class AndroidChannel {
   static final kSyncAppDirConfigPath = "sync_app_dir";
   static final kGetManagedConfig = "get_managed_config";
   static final kGetDeviceSerial = "get_device_serial";
+  static final kStartServiceHeadless = "start_service_headless";
 }
 
 /// flutter/packages/flutter/lib/src/services/keyboard_key.dart -> _keyLabels

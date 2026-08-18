@@ -28,6 +28,11 @@ import java.util.*
 
 
 // intent action, extra
+// AppOpsManager.OPSTR_PROJECT_MEDIA is @hide, so the op is named directly.
+// Granting it (appops set <package> PROJECT_MEDIA allow) is what lets a
+// provisioned device capture with nobody present, across reboots.
+const val OPSTR_PROJECT_MEDIA = "android:project_media"
+
 const val ACT_REQUEST_MEDIA_PROJECTION = "REQUEST_MEDIA_PROJECTION"
 const val ACT_INIT_MEDIA_PROJECTION_AND_SERVICE = "INIT_MEDIA_PROJECTION_AND_SERVICE"
 const val ACT_LOGIN_REQ_NOTIFY = "LOGIN_REQ_NOTIFY"
@@ -46,6 +51,10 @@ const val RES_FAILED = -100
 const val START_ACTION = "start_action"
 const val GET_START_ON_BOOT_OPT = "get_start_on_boot_opt"
 const val SET_START_ON_BOOT_OPT = "set_start_on_boot_opt"
+// Starts MainService headlessly, on the same path BootReceiver uses, so a
+// provisioned client registers on first launch without anyone tapping "share
+// screen" and without a consent dialog.
+const val START_SERVICE_HEADLESS = "start_service_headless"
 const val SYNC_APP_DIR_CONFIG_PATH = "sync_app_dir"
 const val GET_VALUE = "get_value"
 const val GET_MANAGED_CONFIG = "get_managed_config"

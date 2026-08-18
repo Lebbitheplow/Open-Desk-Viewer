@@ -241,6 +241,22 @@ class MainActivity : FlutterActivity() {
                     rdClipboardManager?.syncClipboard(true)
                     result.success(true)
                 }
+                START_SERVICE_HEADLESS -> {
+                    // EXT_INIT_FROM_BOOT so MainService takes the boot path:
+                    // it registers, and it only reaches for a projection when
+                    // the PROJECT_MEDIA op makes that silent. A customer never
+                    // sees a dialog either way.
+                    val it = Intent(this, MainService::class.java).apply {
+                        action = ACT_INIT_MEDIA_PROJECTION_AND_SERVICE
+                        putExtra(EXT_INIT_FROM_BOOT, true)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(it)
+                    } else {
+                        startService(it)
+                    }
+                    result.success(true)
+                }
                 GET_START_ON_BOOT_OPT -> {
                     val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
                     result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, false))

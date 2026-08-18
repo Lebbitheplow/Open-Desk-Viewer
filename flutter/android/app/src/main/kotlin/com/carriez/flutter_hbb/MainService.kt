@@ -353,7 +353,15 @@ class MainService : Service() {
                 checkMediaPermission()
                 _isReady = true
             } ?: let {
-                if (fromBoot) {
+                if (fromBoot && isProjectMediaAllowed()) {
+                    // The PROJECT_MEDIA app op is granted, so the consent
+                    // activity returns RESULT_OK without drawing anything.
+                    // Requesting here is what makes capture survive a reboot on
+                    // a provisioned device: the op lives in appops.xml, the
+                    // token does not survive at all.
+                    Log.i(logTag, "started from boot with PROJECT_MEDIA allowed: taking a projection without a dialog")
+                    requestMediaProjection()
+                } else if (fromBoot) {
                     // A boot start carries no projection token, and asking for
                     // one puts the system consent dialog in front of whoever
                     // happens to be holding the device -- on every reboot, on a
@@ -368,7 +376,7 @@ class MainService : Service() {
                     // still reports in and is manageable; it is capture that is
                     // unavailable, so this says so where an operator will find
                     // it rather than failing silently.
-                    Log.w(logTag, "started from boot with no MediaProjection token, and not asking for one: a consent dialog needs somebody at the device. Screen capture stays unavailable until the app is provisioned as a privileged or device-owner app. Input control is separate and needs the accessibility service enabled in the image.")
+                    Log.w(logTag, "started from boot with no MediaProjection token, and not asking for one: a consent dialog needs somebody at the device. Screen capture stays unavailable until this package is granted the PROJECT_MEDIA app op (appops set <package> PROJECT_MEDIA allow, which persists across reboots), or is installed as a privileged or device-owner app. Input control is separate and needs the accessibility service enabled in the image.")
                 } else {
                     Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
                     requestMediaProjection()
@@ -393,6 +401,33 @@ class MainService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateScreenInfo(newConfig.orientation)
+    }
+
+    // Whether this package may take a MediaProjection without the system
+    // consent dialog.
+    //
+    // The op is stored in /data/system/appops.xml, so a device granted it at
+    // provisioning keeps it across reboots, which is the only reason capture
+    // from boot is possible: the projection token itself does not survive.
+    // Reading one's own op needs no permission.
+    private fun isProjectMediaAllowed(): Boolean {
+        return try {
+            val appOps = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val uid = Process.myUid()
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(OPSTR_PROJECT_MEDIA, uid, packageName)
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(OPSTR_PROJECT_MEDIA, uid, packageName)
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (e: Exception) {
+            // AppOpsManager.OPSTR_PROJECT_MEDIA is @hide, so the string is
+            // written out; an OEM that does not know it throws rather than
+            // answering, and that is not a reason to bring the service down.
+            Log.w(logTag, "could not read the PROJECT_MEDIA app op: $e")
+            false
+        }
     }
 
     private fun requestMediaProjection() {
