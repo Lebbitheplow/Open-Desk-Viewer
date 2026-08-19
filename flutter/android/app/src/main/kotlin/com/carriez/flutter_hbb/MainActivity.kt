@@ -76,6 +76,9 @@ class MainActivity : FlutterActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Returning from a settings page lands here, so this is where the setup
+        // takes its next step. No-op once everything is granted.
+        advanceUnattendedSetup()
         val inputPer = InputService.isOpen
         activity.runOnUiThread {
             flutterMethodChannel?.invokeMethod(
@@ -111,11 +114,27 @@ class MainActivity : FlutterActivity() {
     // device stays reachable: battery optimisation, which otherwise kills the
     // service, and overlay, which BootReceiver checks before starting on boot.
     // Silent when already granted, so it is a one-time cost per device.
-    private fun requestUnattendedGrants() {
+    // Which grants we have already put in front of the operator this launch,
+    // so declining one does not put us in a loop on every resume.
+    private val askedGrants = mutableSetOf<String>()
+
+    // Ask for one missing grant, and only one.
+    //
+    // These are special-access settings pages, not runtime permissions: each is
+    // a separate Activity the operator has to come back from. Firing all three
+    // in a row -- which is what this did at first -- stacks them, so only the
+    // last is answered and the device ends up half provisioned, with a session
+    // that shows the screen and ignores every tap. onResume calls this again
+    // each time they return, so the setup walks forward one page at a time and
+    // stops of its own accord once everything is granted.
+    private fun advanceUnattendedSetup() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                if (askedGrants.add("battery")) {
+                    Log.d(logTag, "unattended setup: asking for the battery exemption")
                     startActivity(
                         Intent(
                             Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
@@ -123,7 +142,12 @@ class MainActivity : FlutterActivity() {
                         )
                     )
                 }
-                if (!Settings.canDrawOverlays(this)) {
+                return
+            }
+
+            if (!Settings.canDrawOverlays(this)) {
+                if (askedGrants.add("overlay")) {
+                    Log.d(logTag, "unattended setup: asking for the overlay grant")
                     startActivity(
                         Intent(
                             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -131,17 +155,24 @@ class MainActivity : FlutterActivity() {
                         )
                     )
                 }
+                return
             }
-            // Remote input and clipboard both run through InputService, and an
-            // app may not enable its own accessibility service -- only the
-            // operator or an MDM policy can. Without it a session shows the
-            // screen and ignores every tap, which looks like a broken session
-            // rather than a missing grant, so send them to the page.
+
+            // Last, because it is the one that needs a toggle inside a list and
+            // is the most likely to be abandoned. Remote input and the
+            // clipboard both run through InputService: without it a session is
+            // video only.
             if (!isInputServiceEnabled()) {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                if (askedGrants.add("accessibility")) {
+                    Log.d(logTag, "unattended setup: asking for the accessibility grant")
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+                return
             }
+
+            Log.i(logTag, "unattended setup: every grant is in place")
         } catch (e: Exception) {
-            Log.w(logTag, "could not request the unattended grants: $e")
+            Log.w(logTag, "unattended setup step failed: $e")
         }
     }
 
@@ -307,7 +338,7 @@ class MainActivity : FlutterActivity() {
                     // as runtime permissions, only by sending the operator to
                     // the settings page once. An MDM policy grants them without
                     // any of this.
-                    requestUnattendedGrants()
+                    advanceUnattendedSetup()
                     // EXT_INIT_FROM_BOOT so MainService takes the boot path:
                     // it registers, and it only reaches for a projection when
                     // the PROJECT_MEDIA op makes that silent. A customer never
