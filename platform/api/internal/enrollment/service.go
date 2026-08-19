@@ -456,6 +456,12 @@ func (s *Service) Enroll(ctx context.Context, req EnrollRequest) (*EnrollResult,
 var defaultStrategy = map[string]string{
 	"verification-method": "use-permanent-password",
 	"approve-mode":        "password",
+	// Remote input is the point of the product, so it is on from the first
+	// heartbeat rather than waiting for somebody to notice a session that
+	// shows the screen and ignores every tap. This is the protocol-level
+	// permission; the accessibility grant on the device is separate and is
+	// what actually delivers the events.
+	"enable-keyboard": "Y",
 }
 
 func seedDefaultStrategy(ctx context.Context, q querier, deviceID uuid.UUID) error {

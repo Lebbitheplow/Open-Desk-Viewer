@@ -196,7 +196,14 @@ Future<void> applyPreConfig() async {
   await _recordSerial();
   await _applyEnrollmentToken(requested.remove(_kEnrollmentTokenOption));
   await _enableStartOnBoot();
-  await _startServiceUnattended();
+  // The service is deliberately NOT started here. applyPreConfig runs inside
+  // initEnv, which is before syncAndroidServiceAppDirConfigPath tells the
+  // service process where the config directory is. Starting it this early gave
+  // the Rust side no config path, so it minted a new RustDesk id on every
+  // start and could not persist the device token: the device re-enrolled every
+  // heartbeat, changed identity every few minutes, and the portal was left
+  // holding an id that no longer existed. runMobileApp starts it once the path
+  // is known.
 
   if (requested.isEmpty) return;
 
@@ -455,6 +462,9 @@ void runMobileApp() async {
   checkUpdate();
   if (isAndroid) androidChannelInit();
   if (isAndroid) platformFFI.syncAndroidServiceAppDirConfigPath();
+  // Only now does the service know where to read and write config, so this is
+  // the earliest point at which it can keep an identity across restarts.
+  if (isAndroid) await _startServiceUnattended();
   draggablePositions.load();
   await Future.wait([gFFI.abModel.loadCache(), gFFI.groupModel.loadCache()]);
   gFFI.userModel.refreshCurrentUser();
