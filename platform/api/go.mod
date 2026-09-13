@@ -1,6 +1,6 @@
 module github.com/OpenDeskViewer/platform/api
 
-go 1.25.0
+go 1.25.11
 
 // The language level stays at 1.25; this is a floor on the build toolchain.
 // go1.26.6 is the first release carrying the fixes for GO-2026-6218, -6090,
@@ -12,9 +12,9 @@ toolchain go1.26.6
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
-	github.com/golang-migrate/migrate/v4 v4.19.1
+	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/google/uuid v1.6.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/rs/zerolog v1.35.1
 	github.com/spf13/viper v1.21.0
 	gopkg.in/yaml.v3 v3.0.1
